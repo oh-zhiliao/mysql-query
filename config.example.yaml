@@ -1,0 +1,14 @@
+# Known databases: friendly name -> connection config
+# Database knowledge (schema, conventions, query patterns) lives in knowledge/{db_name}/
+# See knowledge/CLAUDE.md for the authoring guide
+known_databases:
+  my_app:
+    host: "127.0.0.1"
+    port: 3306
+    user: "${MYSQL_USER}"
+    password: "${MYSQL_PASSWORD}"
+    database: "my_app_db"
+    # Optional: connection timeout in milliseconds (default: 10000)
+    # connect_timeout: 10000
+    # Optional: query timeout in milliseconds (default: 30000)
+    # query_timeout: 30000

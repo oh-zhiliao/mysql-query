@@ -1,0 +1,24 @@
+{
+  "name": "zhiliao-plugin-mysql-query",
+  "version": "1.0.0",
+  "description": "MySQL query plugin for zhiliao",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsc"
+  },
+  "keywords": [
+    "zhiliao",
+    "plugin",
+    "mysql",
+    "database"
+  ],
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "typescript": "^6.0.2"
+  },
+  "dependencies": {
+    "mysql2": "^3.14.0"
+  }
+}
