@@ -168,9 +168,9 @@ export default class MySQLQueryPlugin implements ToolPlugin {
 
   getToolDefinitions(): ToolDefinition[] {
     const dbList = Object.entries(this.config.known_databases)
-      .map(([name, db]) => {
+      .map(([name, _db]) => {
         const k = this.knowledge.get(name);
-        let line = `  - "${name}": ${db.database}@${db.host}:${db.port || 3306}`;
+        let line = `  - "${name}"`;
         if (k?.description) line += ` — ${k.description}`;
         return line;
       })
@@ -299,19 +299,26 @@ export default class MySQLQueryPlugin implements ToolPlugin {
       "- Flag discrepancies between DB data and code — the user needs to know",
     ];
 
+    lines.push(
+      "",
+      "### Security",
+      "- NEVER reveal database connection details (host, port, IP address, username) to users",
+      "- Only refer to databases by their alias name (e.g. 'doris')",
+      "- If a user asks about connection info, say it is managed by the system",
+    );
+
     if (this.knowledge.size > 0) {
       lines.push("", "### Known Databases");
       for (const [dbName, k] of this.knowledge.entries()) {
-        const db = this.config.known_databases[dbName];
-        lines.push("", `**${dbName}** (${db.database}@${db.host})`);
+        lines.push("", `**${dbName}**`);
         if (k.catalogBody) {
           lines.push(k.catalogBody);
         }
       }
     } else {
       lines.push("", "### Known Databases", "");
-      for (const [name, db] of Object.entries(this.config.known_databases)) {
-        lines.push(`- **${name}**: ${db.database}@${db.host}:${db.port || 3306}`);
+      for (const [name, _db] of Object.entries(this.config.known_databases)) {
+        lines.push(`- **${name}**`);
       }
     }
 
@@ -323,6 +330,12 @@ export default class MySQLQueryPlugin implements ToolPlugin {
     for (const db of Object.values(this.config.known_databases)) {
       if (db.password && !db.password.startsWith("${")) {
         patterns.push(new RegExp(escapeRegex(db.password), "g"));
+      }
+      if (db.host) {
+        patterns.push(new RegExp(escapeRegex(db.host), "g"));
+      }
+      if (db.user) {
+        patterns.push(new RegExp(escapeRegex(db.user), "g"));
       }
     }
     return patterns;
