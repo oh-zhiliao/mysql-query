@@ -12,3 +12,8 @@ known_databases:
     # connect_timeout: 10000
     # Optional: query timeout in milliseconds (default: 30000)
     # query_timeout: 30000
+
+# Optional: override the knowledge directory (absolute path). Defaults to
+# {plugin_root}/knowledge. Useful for deployments that want knowledge files
+# isolated from the plugin source tree (e.g. /var/lib/zhiliao/knowledge/mysql-query).
+# knowledge_dir: "/absolute/path/to/knowledge"

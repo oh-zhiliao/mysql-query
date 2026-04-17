@@ -8,7 +8,7 @@ import type { Pool, PoolOptions } from "mysql2/promise";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(__dirname, "..");
-const KNOWLEDGE_DIR = resolve(PLUGIN_ROOT, "knowledge");
+const DEFAULT_KNOWLEDGE_DIR = resolve(PLUGIN_ROOT, "knowledge");
 
 interface DatabaseConfig {
   host: string;
@@ -34,6 +34,10 @@ interface TopicKnowledge {
 
 interface MySQLQueryConfig {
   known_databases: Record<string, DatabaseConfig>;
+  /** Absolute path override for the knowledge directory. When set, overrides the
+   *  default colocated `{plugin_root}/knowledge`. Useful for deploy environments
+   *  that want knowledge files isolated from the plugin source tree. */
+  knowledge_dir?: string;
 }
 
 const READONLY_PREFIXES = ["select", "show", "describe", "desc", "explain", "with"];
@@ -71,6 +75,7 @@ export default class MySQLQueryPlugin implements ToolPlugin {
   private config!: MySQLQueryConfig;
   private pools = new Map<string, Pool>();
   private knowledge = new Map<string, TopicKnowledge>();
+  private knowledgeDir = DEFAULT_KNOWLEDGE_DIR;
 
   async init(config: Record<string, any>): Promise<void> {
     if (!config.known_databases || Object.keys(config.known_databases).length === 0) {
@@ -90,6 +95,9 @@ export default class MySQLQueryPlugin implements ToolPlugin {
     }
 
     this.config = config as MySQLQueryConfig;
+    if (this.config.knowledge_dir) {
+      this.knowledgeDir = this.config.knowledge_dir;
+    }
     this.initPools();
     this.loadKnowledge();
   }
@@ -125,11 +133,11 @@ export default class MySQLQueryPlugin implements ToolPlugin {
   }
 
   private loadKnowledge(): void {
-    if (!existsSync(KNOWLEDGE_DIR)) return;
+    if (!existsSync(this.knowledgeDir)) return;
 
     const dbNames = Object.keys(this.config.known_databases);
     for (const dbName of dbNames) {
-      const topicDir = join(KNOWLEDGE_DIR, dbName);
+      const topicDir = join(this.knowledgeDir, dbName);
       if (!existsSync(topicDir)) continue;
 
       const catalogPath = join(topicDir, "_catalog.md");
