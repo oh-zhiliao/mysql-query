@@ -6,7 +6,12 @@
   "main": "src/index.ts",
   "scripts": {
     "build": "tsc",
-    "test": "vitest run"
+    "test": "vitest run",
+    "lint": "eslint src/ tests/ --max-warnings 0",
+    "lint:fix": "eslint src/ tests/ --fix",
+    "typecheck": "tsc --noEmit -p tsconfig.test.json",
+    "test:all": "npm run lint && npm run typecheck && npm run test",
+    "preflight": "npm run test:all"
   },
   "keywords": [
     "zhiliao",
@@ -16,8 +21,12 @@
   ],
   "license": "ISC",
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^25.6.0",
+    "eslint": "^10.2.0",
+    "globals": "^17.5.0",
     "typescript": "^6.0.2",
+    "typescript-eslint": "^8.58.2",
     "vitest": "^4.1.4"
   },
   "dependencies": {
