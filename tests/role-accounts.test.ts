@@ -210,6 +210,50 @@ describe("role-aware query execution", () => {
     expect(adminResult).toContain("finance_user");
   });
 
+  it("uses an explicit physical database when instance is provided", async () => {
+    const result = await plugin.executeTool("query", {
+      instance: "mydb",
+      database: "reporting",
+      sql: "SELECT 1",
+    }, {
+      channel: "feishu",
+      userId: "ou-admin",
+      role: "finance_admin",
+      logId: "log1",
+    });
+
+    expect(createPoolMock).toHaveBeenCalledWith(expect.objectContaining({
+      database: "reporting",
+      user: "finance_user",
+    }));
+    expect(result).toContain("instance: mydb");
+    expect(result).toContain("database: reporting");
+  });
+
+  it("uses the config default database when instance is provided without database", async () => {
+    const result = await plugin.executeTool("query", {
+      instance: "mydb",
+      sql: "SELECT 1",
+    });
+
+    expect(createPoolMock).toHaveBeenCalledWith(expect.objectContaining({
+      database: "warehouse",
+    }));
+    expect(result).toContain("database: warehouse");
+  });
+
+  it("keeps legacy database=alias callers working", async () => {
+    const result = await plugin.executeTool("query", {
+      database: "mydb",
+      sql: "SELECT 1",
+    });
+
+    expect(createPoolMock).toHaveBeenCalledWith(expect.objectContaining({
+      database: "warehouse",
+    }));
+    expect(result).toContain("mode: legacy");
+  });
+
   it("reuses the same pool for repeated queries under the same role", async () => {
     await plugin.executeTool("query", {
       database: "mydb",
@@ -248,6 +292,58 @@ describe("role-aware query execution", () => {
     expect(result).toContain("readonly_user");
   });
 
+  it("rejects queries that provide neither instance nor legacy database alias", async () => {
+    const result = await plugin.executeTool("query", {
+      sql: "SELECT 1",
+    });
+
+    expect(result).toMatch(/must provide instance or legacy database alias/i);
+  });
+
+  it("rejects unknown instances before pool creation", async () => {
+    const result = await plugin.executeTool("query", {
+      instance: "missing",
+      database: "warehouse",
+      sql: "SELECT 1",
+    });
+
+    expect(result).toMatch(/unknown database alias "missing"/i);
+    expect(createPoolMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects legacy callers when the alias has no default database", async () => {
+    const noDefaultPlugin = new MySQLQueryPlugin();
+    noDefaultPlugin.name = "mysql-query";
+    await noDefaultPlugin.init({
+      known_databases: {
+        nodb: {
+          host: "127.0.0.1",
+          accounts: {
+            default: { user: "readonly_user", password: "secret123" },
+          },
+        },
+      },
+    });
+
+    const result = await noDefaultPlugin.executeTool("query", {
+      database: "nodb",
+      sql: "SELECT 1",
+    });
+
+    expect(result).toMatch(/no target database/i);
+  });
+
+  it("rejects invalid physical database names before pool creation", async () => {
+    const result = await plugin.executeTool("query", {
+      instance: "mydb",
+      database: "wizard;drop",
+      sql: "SELECT 1",
+    });
+
+    expect(result).toMatch(/invalid physical database name/i);
+    expect(createPoolMock).not.toHaveBeenCalled();
+  });
+
   it("fails closed for queries from unmapped non-default roles", async () => {
     await expect(plugin.executeTool("query", {
       database: "mydb",
@@ -259,6 +355,65 @@ describe("role-aware query execution", () => {
       logId: "log-analyst",
     })).resolves.toMatch(/access denied/i);
     expect(createPoolMock).not.toHaveBeenCalled();
+  });
+
+  it("creates separate pools for the same alias/account when physical databases differ", async () => {
+    await plugin.executeTool("query", {
+      instance: "mydb",
+      database: "warehouse",
+      sql: "SELECT 1",
+    }, {
+      channel: "feishu",
+      userId: "ou-admin",
+      role: "finance_admin",
+      logId: "log-warehouse",
+    });
+
+    await plugin.executeTool("query", {
+      instance: "mydb",
+      database: "reporting",
+      sql: "SELECT 1",
+    }, {
+      channel: "feishu",
+      userId: "ou-admin",
+      role: "finance_admin",
+      logId: "log-reporting",
+    });
+
+    expect(createPoolMock).toHaveBeenCalledTimes(2);
+    expect(createPoolMock).toHaveBeenNthCalledWith(1, expect.objectContaining({ database: "warehouse" }));
+    expect(createPoolMock).toHaveBeenNthCalledWith(2, expect.objectContaining({ database: "reporting" }));
+  });
+
+  it("reuses the same pool when new and legacy inputs resolve to the same alias/database/account", async () => {
+    const instanceResult = await plugin.executeTool("query", {
+      instance: "mydb",
+      database: "warehouse",
+      sql: "SELECT 1",
+    }, {
+      channel: "feishu",
+      userId: "ou-admin",
+      role: "finance_admin",
+      logId: "log-new-shape",
+    });
+
+    const legacyResult = await plugin.executeTool("query", {
+      database: "mydb",
+      sql: "SELECT 1",
+    }, {
+      channel: "feishu",
+      userId: "ou-admin",
+      role: "finance_admin",
+      logId: "log-legacy-shape",
+    });
+
+    expect(createPoolMock).toHaveBeenCalledTimes(1);
+    expect(createPoolMock).toHaveBeenCalledWith(expect.objectContaining({
+      database: "warehouse",
+      user: "finance_user",
+    }));
+    expect(instanceResult).toContain("account_user");
+    expect(legacyResult).toContain("account_user");
   });
 
   it("closes lazily created pools on destroy", async () => {
