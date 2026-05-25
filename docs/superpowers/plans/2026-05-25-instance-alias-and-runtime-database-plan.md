@@ -205,8 +205,8 @@ it("reuses the same pool when new and legacy inputs resolve to the same alias/da
     logId: "log-legacy-shape",
   });
 
-  expect(instanceResult).toContain("| col1 |");
-  expect(legacyResult).toContain("| col1 |");
+  expect(instanceResult).toContain("account_user");
+  expect(legacyResult).toContain("account_user");
   expect(createPoolMock).toHaveBeenCalledTimes(1);
   expect(createPoolMock).toHaveBeenCalledWith(expect.objectContaining({
     database: "warehouse",
@@ -310,7 +310,7 @@ git commit -m "refactor: allow mysql aliases without default database"
 
 - [ ] **Step 1: Add resolution helpers with explicit compatibility comments**
 
-In `src/index.ts`, add:
+In `src/index.ts`, add the regex and interface near the other module-level helpers, then add the method inside `class MySQLQueryPlugin`:
 
 ```ts
 const DATABASE_NAME_RE = /^[A-Za-z0-9_-]+$/;
