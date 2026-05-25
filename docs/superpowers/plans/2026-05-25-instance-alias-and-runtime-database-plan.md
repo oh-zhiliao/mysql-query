@@ -36,16 +36,6 @@
 - Modify: `knowledge/CLAUDE.md`
   - note that knowledge remains alias-based and catalogs should mention default/alternate physical databases
 
-## Commits
-
-Planned commit sequence:
-
-1. `test: cover instance alias query resolution`
-2. `feat: resolve runtime databases by alias and role`
-3. `docs: describe alias-based runtime database queries`
-
----
-
 ### Task 1: Lock the New Query Contract with Failing Tests
 
 **Files:**
@@ -115,6 +105,17 @@ it("rejects queries that provide neither instance nor legacy database alias", as
   expect(result).toMatch(/must provide instance or legacy database alias/i);
 });
 
+it("rejects unknown instances before pool creation", async () => {
+  const result = await plugin.executeTool("query", {
+    instance: "missing",
+    database: "warehouse",
+    sql: "SELECT 1",
+  });
+
+  expect(result).toMatch(/unknown database alias "missing"/i);
+  expect(createPoolMock).not.toHaveBeenCalled();
+});
+
 it("rejects legacy callers when the alias has no default database", async () => {
   const noDefaultPlugin = new MySQLQueryPlugin();
   noDefaultPlugin.name = "mysql-query";
@@ -181,6 +182,37 @@ it("creates separate pools for the same alias/account when physical databases di
   expect(createPoolMock).toHaveBeenNthCalledWith(1, expect.objectContaining({ database: "warehouse" }));
   expect(createPoolMock).toHaveBeenNthCalledWith(2, expect.objectContaining({ database: "reporting" }));
 });
+
+it("reuses the same pool when new and legacy inputs resolve to the same alias/database/account", async () => {
+  const instanceResult = await plugin.executeTool("query", {
+    instance: "mydb",
+    database: "warehouse",
+    sql: "SELECT 1",
+  }, {
+    channel: "feishu",
+    userId: "ou-admin",
+    role: "finance_admin",
+    logId: "log-new-shape",
+  });
+
+  const legacyResult = await plugin.executeTool("query", {
+    database: "mydb",
+    sql: "SELECT 1",
+  }, {
+    channel: "feishu",
+    userId: "ou-admin",
+    role: "finance_admin",
+    logId: "log-legacy-shape",
+  });
+
+  expect(instanceResult).toContain("| col1 |");
+  expect(legacyResult).toContain("| col1 |");
+  expect(createPoolMock).toHaveBeenCalledTimes(1);
+  expect(createPoolMock).toHaveBeenCalledWith(expect.objectContaining({
+    database: "warehouse",
+    user: "finance_user",
+  }));
+});
 ```
 
 - [ ] **Step 4: Run the focused tests to verify they fail**
@@ -193,6 +225,7 @@ npm test -- tests/role-accounts.test.ts
 ```
 
 Expected: FAIL because `src/index.ts` still expects `database` to be the alias, still requires config `database`, and still keys pools without the resolved physical database.
+The `noDefaultPlugin.init(...)` case should currently fail at init time because aliases still require a configured default database before Task 2 relaxes that validation.
 
 - [ ] **Step 5: Commit the red tests**
 
@@ -260,7 +293,7 @@ cd /home/felix021/.config/superpowers/worktrees/mysql-query/role-based-db-accoun
 npm test -- tests/role-accounts.test.ts
 ```
 
-Expected: still FAIL, but no longer because `database` is required at init time.
+Expected: still FAIL, but no longer because `database` is required at init time. The remaining failures should now come from the old alias-only query contract and pool behavior.
 
 - [ ] **Step 3: Commit the config-typing change**
 
@@ -307,7 +340,9 @@ private resolveQueryTarget(input: Record<string, any>): ResolvedQueryTarget {
 
   // In compatibility mode, `database` was historically the alias field, so the
   // physical database must come from config instead of the user input payload.
-  const physicalDatabase = requestedInstance ? input.database : dbConfig.database;
+  const physicalDatabase = requestedInstance
+    ? (input.database || dbConfig.database)
+    : dbConfig.database;
   if (!physicalDatabase) {
     throw new Error(`No target database resolved for alias "${alias}". Specify database explicitly or configure a default database.`);
   }
@@ -340,7 +375,7 @@ cd /home/felix021/.config/superpowers/worktrees/mysql-query/role-based-db-accoun
 npm test -- tests/role-accounts.test.ts
 ```
 
-Expected: some tests still FAIL because pool creation and query execution still use the old alias-only model, but missing-target and invalid-name resolution tests should now pass.
+Expected: still FAIL for the same reasons as after Task 2, because `resolveQueryTarget(...)` is not wired into `executeQuery(...)` or the query tool schema yet.
 
 - [ ] **Step 4: Commit the resolution helpers**
 
@@ -456,7 +491,36 @@ const header = [
 ].join("\n");
 ```
 
-- [ ] **Step 4: Update the security test query call to the preferred input shape**
+- [ ] **Step 4: Update the `query` tool schema to expose `instance` and keep legacy compatibility**
+
+In `src/index.ts`, change the `query` tool definition from requiring `database` to:
+
+```ts
+input_schema: {
+  type: "object",
+  properties: {
+    instance: {
+      type: "string",
+      description: "Configured connection alias. Preferred for new callers.",
+    },
+    database: {
+      type: "string",
+      description: "Physical database/schema when used with `instance`; legacy callers may still send the alias here when `instance` is omitted.",
+    },
+    sql: {
+      type: "string",
+      description: "Read-only SQL query to execute.",
+    },
+    limit: {
+      type: "number",
+      description: "Maximum number of rows to return (default 100, max 1000).",
+    },
+  },
+  required: ["sql"],
+}
+```
+
+- [ ] **Step 5: Update the security test query call to the preferred input shape**
 
 In `tests/security.test.ts`, change:
 
@@ -484,7 +548,7 @@ expect(result).toContain("instance: mydb");
 expect(result).toContain("database: warehouse");
 ```
 
-- [ ] **Step 5: Run the focused tests to verify query execution is green**
+- [ ] **Step 6: Run the focused tests to verify query execution is green**
 
 Run:
 
@@ -495,7 +559,7 @@ npm test -- tests/role-accounts.test.ts tests/security.test.ts
 
 Expected: PASS
 
-- [ ] **Step 6: Commit the runtime execution changes**
+- [ ] **Step 7: Commit the runtime execution changes**
 
 ```bash
 git add src/index.ts tests/role-accounts.test.ts tests/security.test.ts
