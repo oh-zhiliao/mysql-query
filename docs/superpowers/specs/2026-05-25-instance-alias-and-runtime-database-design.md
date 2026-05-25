@@ -79,6 +79,11 @@ Rules:
   - no `context.role` => use `accounts.default`
   - mapped `context.role` => use `accounts[role]`
   - unmapped non-default role => reject
+- Type-level change is required:
+  - `DatabaseConfig.database` must change from required `string` to optional `string | undefined`
+- Init validation must be relaxed accordingly:
+  - `host` remains required
+  - `database` is no longer required at plugin init time
 
 ### Query Tool Contract
 
@@ -116,16 +121,18 @@ Validation rules:
 - reject if both `instance` and `database` are absent
 - when `instance` is present, `database` means the physical target database
 - when `instance` is absent, `database` is first interpreted as the legacy alias input
-- if a physical database name is resolved from user input, it must match a strict identifier pattern such as `^[A-Za-z0-9_]+$`
+- if a physical database name is resolved from user input, it must match a strict identifier pattern such as `^[A-Za-z0-9_-]+$`
 
 Resolution rules:
 
 1. If both `instance` and `database` are absent, reject with a clear error.
-2. If `instance` is present, treat it as the alias.
-3. If `instance` is absent and `database` is present, treat `database` as the legacy alias input.
-4. Determine the physical target database:
+2. Resolve the alias:
+   - if `instance` is present, the resolved alias is `instance`
+   - otherwise the resolved alias is legacy `database`
+3. Determine the physical target database:
    - explicit `input.database` when `instance` is present
-   - otherwise config default `known_databases[instance].database`
+   - otherwise config default `known_databases[resolved_alias].database`
+4. In legacy mode, the physical target database always comes from the config default. Legacy input has no way to specify a physical database directly.
 5. If neither an explicit physical database nor a config default exists, reject with a clear error before pool creation.
 
 This makes new usage semantically correct while preserving old callers.
@@ -168,6 +175,12 @@ Rationale:
 - physical database selection is still a per-query input concern, but the resolved database must participate in the pool key to avoid session-state bleed across pooled connections
 - database privileges are enforced by the account, not by the plugin's pool key
 - the pool key is an isolation mechanism, not a permission boundary
+
+Known limitation for this phase:
+
+- pool count grows with the number of `(alias, account, physical_database)` combinations actually queried
+- the implementation plan must either document this as an accepted bounded-cost tradeoff or add a lightweight eviction/cap strategy if the codebase already has a suitable pattern
+- for current expected usage, the number of distinct databases per alias is assumed to be small
 
 ### Physical Database Selection
 
@@ -225,7 +238,8 @@ The goal is to remove ambiguity during debugging without leaking secrets.
 
 Required errors:
 
-- unknown alias
+- unknown alias from `instance`
+- unknown alias from legacy `database`
 - unmapped non-default role
 - invalid physical database name
 - both `instance` and `database` absent
@@ -254,7 +268,9 @@ The implementation plan must cover at least:
 
 - new query input using `instance + database`
 - new query input using `instance` only and falling back to config default database
+- new query input using `instance=<unknown>` => clear error
 - legacy query input using `database=<alias>` and config default present
+- legacy query input using `database=<unknown>` => clear error
 - legacy query input using `database=<alias>` and config default missing => clear error
 - both `instance` and `database` absent => clear error
 - invalid physical database name => clear error
