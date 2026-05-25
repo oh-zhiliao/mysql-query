@@ -192,6 +192,9 @@ export default class MySQLQueryPlugin implements ToolPlugin {
         description: [
           "Execute a read-only SQL query against a configured MySQL database.",
           "Only SELECT, SHOW, DESCRIBE, and EXPLAIN statements are allowed.",
+          "Use `instance` for the configured connection alias.",
+          "Use optional `database` for the physical target database/schema.",
+          "Legacy callers may still send `database=<alias>`, but new callers should prefer `instance + database`.",
           "",
           "Known databases:",
           dbList,
@@ -237,6 +240,7 @@ export default class MySQLQueryPlugin implements ToolPlugin {
         name: "get_topic_knowledge",
         description: [
           "Load a detailed knowledge document for a MySQL database. Use this before writing complex queries to get schema details, query patterns, and analysis recipes.",
+          "For this tool, `database` still means the configured alias used by the knowledge directory.",
           "",
           "Available docs:",
           availableDocs || "  (none)",

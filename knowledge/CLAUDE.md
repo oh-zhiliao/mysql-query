@@ -18,6 +18,9 @@ knowledge/
 2. Create `_catalog.md` with the required format (see below)
 3. Optionally add task-based doc files
 
+Knowledge directories remain keyed by configured alias, not by runtime physical database.
+If one alias can query multiple physical databases, document the default physical database and common alternatives in `_catalog.md`.
+
 ## _catalog.md Format
 
 ```markdown

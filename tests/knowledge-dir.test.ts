@@ -69,6 +69,29 @@ describe("MySQLQueryPlugin knowledge_dir override", () => {
     expect(out).toContain("Schema details here");
   });
 
+  it("keeps get_topic_knowledge alias-based after query contract changes", async () => {
+    const topicDir = join(tmpDir, "doris");
+    mkdirSync(topicDir, { recursive: true });
+    writeFileSync(
+      join(topicDir, "_catalog.md"),
+      "---\ndescription: doris warehouse\n---\nCatalog for doris\n",
+    );
+    writeFileSync(
+      join(topicDir, "schema.md"),
+      "---\ntitle: Schema\ndescription: table schema reference\n---\nSchema details here\n",
+    );
+
+    const plugin = new MySQLQueryPlugin();
+    plugin.name = "mysql-query";
+    await plugin.init({ ...structuredClone(BASE_CONFIG), knowledge_dir: tmpDir });
+
+    const out = await plugin.executeTool("get_topic_knowledge", {
+      database: "doris",
+      doc: "schema",
+    });
+    expect(out).toContain("Schema details here");
+  });
+
   it("silently skips when knowledge_dir does not exist", async () => {
     const missing = join(tmpDir, "does-not-exist");
     const plugin = new MySQLQueryPlugin();
