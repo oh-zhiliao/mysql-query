@@ -169,9 +169,11 @@ describe("role account resolution", () => {
 
 describe("role-aware query execution", () => {
   let plugin: MySQLQueryPlugin;
+  let consoleLogSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(async () => {
     createPoolMock.mockClear();
+    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     plugin = new MySQLQueryPlugin();
     plugin.name = "mysql-query";
     await plugin.init(structuredClone(NEW_CONFIG));
@@ -226,6 +228,9 @@ describe("role-aware query execution", () => {
       database: "reporting",
       user: "finance_user",
     }));
+    expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining(
+      "[mysql-query] query logId=log1 requestedRole=finance_admin account=finance_admin instance=mydb database=reporting mode=instance",
+    ));
     expect(result).toContain("instance: mydb");
     expect(result).toContain("database: reporting");
   });

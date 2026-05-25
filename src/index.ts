@@ -492,6 +492,10 @@ export default class MySQLQueryPlugin implements ToolPlugin {
       }
 
       const accountKey = this.resolveAccountKey(target.alias, context);
+      const requestedRole = context?.role || "default";
+      console.log(
+        `[mysql-query] query logId=${context?.logId || "-"} requestedRole=${requestedRole} account=${accountKey} instance=${target.alias} database=${target.physicalDatabase} mode=${target.legacyMode ? "legacy" : "instance"}`,
+      );
       const pool = this.getOrCreatePool(target.alias, accountKey, target.physicalDatabase);
       const finalSql = this.applyLimit(sql, limit);
       const timeoutMs = this.config.known_databases[target.alias].query_timeout || 30000;
