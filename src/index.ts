@@ -1,7 +1,7 @@
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import type { ToolPlugin, ToolDefinition } from "../../../src/agent/tool-plugin.js";
+import type { ToolPlugin, ToolDefinition, RequestContext } from "../../../src/agent/tool-plugin.js";
 
 import mysql from "mysql2/promise";
 import type { Pool, PoolOptions } from "mysql2/promise";
@@ -10,14 +10,18 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(__dirname, "..");
 const DEFAULT_KNOWLEDGE_DIR = resolve(PLUGIN_ROOT, "knowledge");
 
+interface AccountConfig {
+  user: string;
+  password: string;
+}
+
 interface DatabaseConfig {
   host: string;
   port?: number;
-  user: string;
-  password: string;
   database: string;
   connect_timeout?: number;
   query_timeout?: number;
+  accounts: Record<string, AccountConfig>;
 }
 
 interface TopicDocMeta {
@@ -83,14 +87,25 @@ export default class MySQLQueryPlugin implements ToolPlugin {
     }
 
     for (const [name, db] of Object.entries(config.known_databases as Record<string, DatabaseConfig>)) {
-      if (!db.host || !db.user) {
-        throw new Error(`Database "${name}" missing required fields (host, user)`);
+      if (!db.host || !db.database) {
+        throw new Error(`Database "${name}" missing required fields (host, database)`);
       }
-      if (db.password && db.password.startsWith("${")) {
-        throw new Error(`Database "${name}": password env var not resolved — check environment variables`);
+      if ((db as any).user || (db as any).password) {
+        throw new Error(`Database "${name}" still uses legacy top-level user/password. Migrate to accounts.default.`);
       }
-      if (db.user.startsWith("${")) {
-        throw new Error(`Database "${name}": user env var not resolved — check environment variables`);
+      if (!db.accounts || Object.keys(db.accounts).length === 0) {
+        throw new Error(`Database "${name}" must define accounts.default and any role-specific accounts`);
+      }
+      if (!db.accounts.default) {
+        throw new Error(`Database "${name}" missing required accounts.default`);
+      }
+      for (const [accountKey, account] of Object.entries(db.accounts)) {
+        if (!account.user || !account.password) {
+          throw new Error(`Database "${name}" account "${accountKey}" missing required fields (user, password)`);
+        }
+        if (account.password.startsWith("${") || account.user.startsWith("${")) {
+          throw new Error(`Database "${name}" account "${accountKey}": env var not resolved — check environment variables`);
+        }
       }
     }
 
@@ -98,7 +113,6 @@ export default class MySQLQueryPlugin implements ToolPlugin {
     if (this.config.knowledge_dir) {
       this.knowledgeDir = this.config.knowledge_dir;
     }
-    this.initPools();
     this.loadKnowledge();
   }
 
@@ -107,29 +121,10 @@ export default class MySQLQueryPlugin implements ToolPlugin {
       try {
         await pool.end();
       } catch (err: any) {
-        console.error(`Error closing pool for "${name}": ${err.message}`);
+        console.error(`Error closing pool for "${this.describePoolKey(name)}": ${err.message}`);
       }
     }
     this.pools.clear();
-  }
-
-  private initPools(): void {
-    for (const [name, db] of Object.entries(this.config.known_databases)) {
-      const opts: PoolOptions = {
-        host: db.host,
-        port: db.port || 3306,
-        user: db.user,
-        password: db.password,
-        database: db.database,
-        connectTimeout: db.connect_timeout || 10000,
-        waitForConnections: true,
-        connectionLimit: 3,
-        maxIdle: 1,
-        idleTimeout: 60000,
-        enableKeepAlive: true,
-      };
-      this.pools.set(name, mysql.createPool(opts));
-    }
   }
 
   private loadKnowledge(): void {
@@ -255,10 +250,10 @@ export default class MySQLQueryPlugin implements ToolPlugin {
     return tools;
   }
 
-  async executeTool(name: string, input: Record<string, any>): Promise<string> {
+  async executeTool(name: string, input: Record<string, any>, context?: RequestContext): Promise<string> {
     switch (name) {
       case "query":
-        return this.executeQuery(input);
+        return this.executeQuery(input, context);
       case "get_topic_knowledge":
         return this.getTopicKnowledge(input);
       default:
@@ -336,17 +331,83 @@ export default class MySQLQueryPlugin implements ToolPlugin {
   getSecretPatterns(): RegExp[] {
     const patterns: RegExp[] = [];
     for (const db of Object.values(this.config.known_databases)) {
-      if (db.password && !db.password.startsWith("${")) {
-        patterns.push(new RegExp(escapeRegex(db.password), "g"));
-      }
       if (db.host) {
         patterns.push(new RegExp(escapeRegex(db.host), "g"));
       }
-      if (db.user) {
-        patterns.push(new RegExp(escapeRegex(db.user), "g"));
+      for (const account of Object.values(db.accounts)) {
+        patterns.push(new RegExp(escapeRegex(account.password), "g"));
+        patterns.push(new RegExp(escapeRegex(account.user), "g"));
       }
     }
     return patterns;
+  }
+
+  private resolveAccountKey(dbName: string, context?: RequestContext): string {
+    const db = this.config.known_databases[dbName];
+    if (!db) {
+      throw new Error(`Unknown database "${dbName}"`);
+    }
+
+    const role = context?.role;
+    if (!role) {
+      return "default";
+    }
+
+    if (Object.hasOwn(db.accounts, role)) {
+      return role;
+    }
+
+    throw new Error(`Access denied: role ${role} is not configured for database ${dbName}.`);
+  }
+
+  private getAccountConfig(dbName: string, accountKey: string): AccountConfig {
+    const db = this.config.known_databases[dbName];
+    if (!db || !Object.hasOwn(db.accounts, accountKey)) {
+      throw new Error(`Access denied: role ${accountKey} is not configured for database ${dbName}.`);
+    }
+    return db.accounts[accountKey]!;
+  }
+
+  private buildPoolKey(dbName: string, accountKey: string): string {
+    return `${dbName}\u0000${accountKey}`;
+  }
+
+  private describePoolKey(poolKey: string): string {
+    const [dbName, accountKey] = poolKey.split("\u0000");
+    if (!accountKey) {
+      return poolKey;
+    }
+    return `${dbName} (role=${accountKey})`;
+  }
+
+  private getOrCreatePool(dbName: string, accountKey: string): Pool {
+    const poolKey = this.buildPoolKey(dbName, accountKey);
+    const existing = this.pools.get(poolKey);
+    if (existing) {
+      return existing;
+    }
+
+    const db = this.config.known_databases[dbName];
+    if (!db) {
+      throw new Error(`Unknown database "${dbName}"`);
+    }
+    const account = this.getAccountConfig(dbName, accountKey);
+    const opts: PoolOptions = {
+      host: db.host,
+      port: db.port || 3306,
+      user: account.user,
+      password: account.password,
+      database: db.database,
+      connectTimeout: db.connect_timeout || 10000,
+      waitForConnections: true,
+      connectionLimit: 3,
+      maxIdle: 1,
+      idleTimeout: 60000,
+      enableKeepAlive: true,
+    };
+    const pool = mysql.createPool(opts);
+    this.pools.set(poolKey, pool);
+    return pool;
   }
 
   private getTopicKnowledge(input: Record<string, any>): string {
@@ -372,15 +433,15 @@ export default class MySQLQueryPlugin implements ToolPlugin {
     }
   }
 
-  private async executeQuery(input: Record<string, any>): Promise<string> {
+  private async executeQuery(input: Record<string, any>, context?: RequestContext): Promise<string> {
     try {
       const dbName: string = input.database;
       const sql: string = input.sql;
       const limit: number = Math.min(input.limit || 100, 1000);
 
-      const pool = this.pools.get(dbName);
-      if (!pool) {
-        const available = Array.from(this.pools.keys()).join(", ");
+      const dbConfig = this.config.known_databases[dbName];
+      if (!dbConfig) {
+        const available = Object.keys(this.config.known_databases).join(", ");
         return `Unknown database "${dbName}". Available: ${available}`;
       }
 
@@ -388,9 +449,9 @@ export default class MySQLQueryPlugin implements ToolPlugin {
         return "Error: Only read-only queries are allowed (SELECT, SHOW, DESCRIBE, DESC, EXPLAIN, WITH). Write operations are blocked for safety.";
       }
 
+      const accountKey = this.resolveAccountKey(dbName, context);
+      const pool = this.getOrCreatePool(dbName, accountKey);
       const finalSql = this.applyLimit(sql, limit);
-
-      const dbConfig = this.config.known_databases[dbName];
       const timeoutMs = dbConfig.query_timeout || 30000;
 
       const [rows, fields] = await pool.query({ sql: finalSql, timeout: timeoutMs });

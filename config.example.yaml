@@ -5,9 +5,14 @@ known_databases:
   my_app:
     host: "127.0.0.1"
     port: 3306
-    user: "${MYSQL_USER}"
-    password: "${MYSQL_PASSWORD}"
     database: "my_app_db"
+    accounts:
+      default:
+        user: "${MYSQL_USER}"
+        password: "${MYSQL_PASSWORD}"
+      # analyst:
+      #   user: "${MYSQL_ANALYST_USER}"
+      #   password: "${MYSQL_ANALYST_PASSWORD}"
     # Optional: connection timeout in milliseconds (default: 10000)
     # connect_timeout: 10000
     # Optional: query timeout in milliseconds (default: 30000)

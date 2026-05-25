@@ -19,9 +19,13 @@ const BASE_CONFIG = {
     doris: {
       host: "10.0.0.1",
       port: 9030,
-      user: "admin",
-      password: "secret123",
       database: "warehouse",
+      accounts: {
+        default: {
+          user: "admin",
+          password: "secret123",
+        },
+      },
     },
   },
 };

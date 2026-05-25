@@ -4,7 +4,10 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("mysql2/promise", () => ({
   default: {
     createPool: vi.fn(() => ({
-      query: vi.fn(),
+      query: vi.fn().mockResolvedValue([
+        [{ id: 1, name: "test" }],
+        [{ name: "id" }, { name: "name" }],
+      ]),
       end: vi.fn(),
     })),
   },
@@ -30,16 +33,28 @@ const TEST_CONFIG = {
     mydb: {
       host: "10.0.0.1",
       port: 9030,
-      user: "admin",
-      password: "secret123",
       database: "warehouse",
+      accounts: {
+        default: {
+          user: "admin",
+          password: "secret123",
+        },
+        finance_admin: {
+          user: "finance_admin",
+          password: "finance-secret!",
+        },
+      },
     },
     secondary: {
       host: "192.168.1.100",
       port: 3306,
-      user: "readonly_user",
-      password: "p@ssw0rd!",
       database: "analytics",
+      accounts: {
+        default: {
+          user: "readonly_user",
+          password: "p@ssw0rd!",
+        },
+      },
     },
   },
 };
@@ -152,22 +167,20 @@ describe("mysql-query security: no connection info leakage", () => {
       const hasReadonly = patterns.some((p) => p.test("user: readonly_user"));
       expect(hasReadonly).toBe(true);
     });
+
+    it("should match role-specific account usernames and passwords", () => {
+      const patterns = plugin.getSecretPatterns();
+
+      const hasFinanceUser = patterns.some((p) => p.test("user: finance_admin"));
+      expect(hasFinanceUser).toBe(true);
+
+      const hasFinancePassword = patterns.some((p) => p.test("password: finance-secret!"));
+      expect(hasFinancePassword).toBe(true);
+    });
   });
 
   describe("executeQuery result header", () => {
     it("should NOT contain host/port info in query result header", async () => {
-      // Mock the pool to return results
-      const mockPool = {
-        query: vi.fn().mockResolvedValue([
-          [{ id: 1, name: "test" }],
-          [{ name: "id" }, { name: "name" }],
-        ]),
-        end: vi.fn(),
-      };
-
-      // Access private pools map to inject mock
-      (plugin as any).pools.set("mydb", mockPool);
-
       const result = await plugin.executeTool("query", {
         database: "mydb",
         sql: "SELECT * FROM users",

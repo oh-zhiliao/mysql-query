@@ -10,7 +10,8 @@ MySQL database query plugin for the [Zhiliao](https://github.com/git-zhiliao/zhi
 - **Auto LIMIT**: SELECT statements without LIMIT get one automatically (default 100, max 1000) to prevent full table scans
 - **Multi-database Support**: Reference configured databases by friendly names
 - **Knowledge System**: Three-layer knowledge loading — on-demand doc loading saves tokens
-- **Connection Pooling**: Independent pool per database with automatic lifecycle management
+- **Role-based DB Accounts**: A single database alias can map to different query accounts by `role`
+- **Connection Pooling**: Independent pool per database-alias and role pair with automatic lifecycle management
 
 ## Tools Provided
 
@@ -47,6 +48,7 @@ mysql-query/
 - **Read-only enforcement**: Only `SELECT`, `SHOW`, `DESCRIBE`, `DESC`, `EXPLAIN`, `WITH` (CTE) statements allowed
 - **Write interception**: `INSERT`, `UPDATE`, `DELETE`, `DROP`, `CREATE`, `ALTER`, `TRUNCATE` etc. are all rejected
 - **Password filtering**: All database passwords are auto-masked via secret patterns
+- **Fail-closed authorization**: If a non-default role is present but the database has no matching account, the query is rejected instead of falling back to `default`
 - **Query timeout**: Configurable per database (default 30s)
 
 ---
@@ -84,12 +86,24 @@ known_databases:
   my_app:
     host: "127.0.0.1"
     port: 3306
-    user: "${MYSQL_USER}"
-    password: "${MYSQL_PASSWORD}"
     database: "my_app_db"
+    accounts:
+      default:
+        user: "${MYSQL_USER}"
+        password: "${MYSQL_PASSWORD}"
+      finance_admin:
+        user: "${MYSQL_FINANCE_ADMIN_USER}"
+        password: "${MYSQL_FINANCE_ADMIN_PASSWORD}"
     # connect_timeout: 10000   # Connection timeout in ms (default: 10000)
     # query_timeout: 30000     # Query timeout in ms (default: 30000)
 ```
+
+Notes:
+
+- `accounts.default` is used when no role is present in the request context
+- If Zhiliao passes a `role`, the plugin looks for `accounts.<role>` first
+- If the role is not `default` and no matching account exists, the query is rejected; it does not silently downgrade to `default`
+- Legacy top-level `user/password` has been removed and must be migrated to `accounts.default`
 
 ### Verification
 
