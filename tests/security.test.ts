@@ -182,7 +182,8 @@ describe("mysql-query security: no connection info leakage", () => {
   describe("executeQuery result header", () => {
     it("should NOT contain host/port info in query result header", async () => {
       const result = await plugin.executeTool("query", {
-        database: "mydb",
+        instance: "mydb",
+        database: "warehouse",
         sql: "SELECT * FROM users",
       });
 
@@ -191,6 +192,8 @@ describe("mysql-query security: no connection info leakage", () => {
       expect(result).not.toContain("admin");
       // The alias name "mydb" is fine to show
       expect(result).toContain("mydb");
+      expect(result).toContain("instance: mydb");
+      expect(result).toContain("database: warehouse");
     });
   });
 });

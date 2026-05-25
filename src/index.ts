@@ -201,9 +201,13 @@ export default class MySQLQueryPlugin implements ToolPlugin {
         input_schema: {
           type: "object",
           properties: {
+            instance: {
+              type: "string",
+              description: "Configured connection alias. Preferred for new callers.",
+            },
             database: {
               type: "string",
-              description: "Known database name (must match a key in known_databases config)",
+              description: "Physical database/schema when used with `instance`; legacy callers may still send the alias here when `instance` is omitted.",
             },
             sql: {
               type: "string",
@@ -215,7 +219,7 @@ export default class MySQLQueryPlugin implements ToolPlugin {
               default: 100,
             },
           },
-          required: ["database", "sql"],
+          required: ["sql"],
         },
       },
     ];
@@ -408,36 +412,36 @@ export default class MySQLQueryPlugin implements ToolPlugin {
     return { alias, physicalDatabase, legacyMode };
   }
 
-  private buildPoolKey(dbName: string, accountKey: string): string {
-    return `${dbName}\u0000${accountKey}`;
+  private buildPoolKey(alias: string, accountKey: string, physicalDatabase: string): string {
+    return `${alias}\u0000${accountKey}\u0000${physicalDatabase}`;
   }
 
   private describePoolKey(poolKey: string): string {
-    const [dbName, accountKey] = poolKey.split("\u0000");
-    if (!accountKey) {
+    const [alias, accountKey, physicalDatabase] = poolKey.split("\u0000");
+    if (!accountKey || !physicalDatabase) {
       return poolKey;
     }
-    return `${dbName} (role=${accountKey})`;
+    return `${alias} (role=${accountKey}, database=${physicalDatabase})`;
   }
 
-  private getOrCreatePool(dbName: string, accountKey: string): Pool {
-    const poolKey = this.buildPoolKey(dbName, accountKey);
+  private getOrCreatePool(alias: string, accountKey: string, physicalDatabase: string): Pool {
+    const poolKey = this.buildPoolKey(alias, accountKey, physicalDatabase);
     const existing = this.pools.get(poolKey);
     if (existing) {
       return existing;
     }
 
-    const db = this.config.known_databases[dbName];
+    const db = this.config.known_databases[alias];
     if (!db) {
-      throw new Error(`Unknown database "${dbName}"`);
+      throw new Error(`Unknown database alias "${alias}".`);
     }
-    const account = this.getAccountConfig(dbName, accountKey);
+    const account = this.getAccountConfig(alias, accountKey);
     const opts: PoolOptions = {
       host: db.host,
       port: db.port || 3306,
       user: account.user,
       password: account.password,
-      database: db.database,
+      database: physicalDatabase,
       connectTimeout: db.connect_timeout || 10000,
       waitForConnections: true,
       connectionLimit: 3,
@@ -475,24 +479,18 @@ export default class MySQLQueryPlugin implements ToolPlugin {
 
   private async executeQuery(input: Record<string, any>, context?: RequestContext): Promise<string> {
     try {
-      const dbName: string = input.database;
+      const target = this.resolveQueryTarget(input);
       const sql: string = input.sql;
       const limit: number = Math.min(input.limit || 100, 1000);
-
-      const dbConfig = this.config.known_databases[dbName];
-      if (!dbConfig) {
-        const available = Object.keys(this.config.known_databases).join(", ");
-        return `Unknown database "${dbName}". Available: ${available}`;
-      }
 
       if (!isReadOnlyQuery(sql)) {
         return "Error: Only read-only queries are allowed (SELECT, SHOW, DESCRIBE, DESC, EXPLAIN, WITH). Write operations are blocked for safety.";
       }
 
-      const accountKey = this.resolveAccountKey(dbName, context);
-      const pool = this.getOrCreatePool(dbName, accountKey);
+      const accountKey = this.resolveAccountKey(target.alias, context);
+      const pool = this.getOrCreatePool(target.alias, accountKey, target.physicalDatabase);
       const finalSql = this.applyLimit(sql, limit);
-      const timeoutMs = dbConfig.query_timeout || 30000;
+      const timeoutMs = this.config.known_databases[target.alias].query_timeout || 30000;
 
       const [rows, fields] = await pool.query({ sql: finalSql, timeout: timeoutMs });
 
@@ -510,7 +508,9 @@ export default class MySQLQueryPlugin implements ToolPlugin {
 
       const header = [
         `## SQL Used (MUST include in your answer)`,
-        `database: ${dbName}`,
+        `instance: ${target.alias}`,
+        `database: ${target.physicalDatabase}`,
+        `mode: ${target.legacyMode ? "legacy" : "instance"}`,
         `sql: ${finalSql}`,
         `rows: ${rows.length}`,
         ``,
