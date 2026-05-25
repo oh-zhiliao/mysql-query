@@ -18,7 +18,7 @@ interface AccountConfig {
 interface DatabaseConfig {
   host: string;
   port?: number;
-  database: string;
+  database?: string;
   connect_timeout?: number;
   query_timeout?: number;
   accounts: Record<string, AccountConfig>;
@@ -87,8 +87,8 @@ export default class MySQLQueryPlugin implements ToolPlugin {
     }
 
     for (const [name, db] of Object.entries(config.known_databases as Record<string, DatabaseConfig>)) {
-      if (!db.host || !db.database) {
-        throw new Error(`Database "${name}" missing required fields (host, database)`);
+      if (!db.host) {
+        throw new Error(`Database "${name}" missing required field (host)`);
       }
       if ((db as any).user || (db as any).password) {
         throw new Error(`Database "${name}" still uses legacy top-level user/password. Migrate to accounts.default.`);
