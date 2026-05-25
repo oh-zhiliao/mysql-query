@@ -24,6 +24,7 @@ without breaking existing callers that still send `database=<alias>`.
 - Keep backward compatibility for old callers that still send `database` as the alias.
 - Keep role-to-account routing and fail-closed behavior for unmapped non-default roles.
 - Add code comments explaining the reason for the compatibility path and runtime database selection model.
+- Keep runtime semantics deterministic and safe under pooling; no connection state bleed between databases.
 
 ## Non-Goals
 
@@ -102,14 +103,30 @@ Compatibility input shape:
 }
 ```
 
+New tool JSON schema:
+
+- `required: ["sql"]`
+- `instance?: string`
+- `database?: string`
+- `sql: string`
+- `limit?: number`
+
+Validation rules:
+
+- reject if both `instance` and `database` are absent
+- when `instance` is present, `database` means the physical target database
+- when `instance` is absent, `database` is first interpreted as the legacy alias input
+- if a physical database name is resolved from user input, it must match a strict identifier pattern such as `^[A-Za-z0-9_]+$`
+
 Resolution rules:
 
-1. If `instance` is present, treat it as the alias.
-2. If `instance` is absent and `database` is present, treat `database` as the legacy alias input.
-3. Determine the physical target database:
+1. If both `instance` and `database` are absent, reject with a clear error.
+2. If `instance` is present, treat it as the alias.
+3. If `instance` is absent and `database` is present, treat `database` as the legacy alias input.
+4. Determine the physical target database:
    - explicit `input.database` when `instance` is present
    - otherwise config default `known_databases[instance].database`
-4. If neither an explicit physical database nor a config default exists, reject with a clear error.
+5. If neither an explicit physical database nor a config default exists, reject with a clear error before pool creation.
 
 This makes new usage semantically correct while preserving old callers.
 
@@ -143,14 +160,14 @@ Pools should be keyed by:
 
 - configured alias
 - resolved account key / role
-
-Pools should not be keyed by physical database.
+- resolved physical database
 
 Rationale:
 
 - a pool represents a connection/account route to one instance
-- physical database selection is a per-query concern
+- physical database selection is still a per-query input concern, but the resolved database must participate in the pool key to avoid session-state bleed across pooled connections
 - database privileges are enforced by the account, not by the plugin's pool key
+- the pool key is an isolation mechanism, not a permission boundary
 
 ### Physical Database Selection
 
@@ -163,12 +180,12 @@ At query execution time:
 
 Implementation expectation:
 
-- if the driver supports per-query database override cleanly, use that
-- otherwise issue `USE <database>` on a dedicated connection before the query, or use a safe equivalent approach
+- resolve the target physical database before any pool lookup
+- validate the resolved physical database name against a strict identifier rule before using it
+- create or reuse a pool keyed by `(alias, account, resolved_database)`
+- set the resolved physical database in the connection options for that pool
 
-The implementation must preserve connection isolation and not let one request's selected database bleed into another unrelated request.
-
-That is the main correctness risk of this redesign and must be covered by tests.
+The implementation must not rely on issuing raw `USE <database>` SQL as the primary switching mechanism. That approach is too easy to get wrong under pooled connections and complicates injection safety. The resolved-database pool key is the chosen design for this phase.
 
 ## Backward Compatibility
 
@@ -177,7 +194,7 @@ This is not a hard breaking change in the next release.
 Compatibility policy:
 
 - old query callers remain supported
-- new tool descriptions should teach `instance + optional database`
+- phase 1 descriptions should state that `instance + optional database` is preferred, while explicitly noting that legacy `database=<alias>` is still accepted
 - old-style `database=<alias>` remains accepted but is treated as deprecated
 
 The code must contain short comments explaining:
@@ -194,6 +211,7 @@ Query summaries and debug-oriented output should make the distinction explicit:
 
 - `instance=<alias>`
 - `database=<physical database actually used>`
+- `mode=legacy` when the compatibility path was used
 
 This applies to:
 
@@ -209,6 +227,8 @@ Required errors:
 
 - unknown alias
 - unmapped non-default role
+- invalid physical database name
+- both `instance` and `database` absent
 - no target physical database provided and no config default exists
 - runtime database access denied by the database server
 
@@ -234,12 +254,15 @@ The implementation plan must cover at least:
 
 - new query input using `instance + database`
 - new query input using `instance` only and falling back to config default database
-- legacy query input using `database=<alias>`
+- legacy query input using `database=<alias>` and config default present
+- legacy query input using `database=<alias>` and config default missing => clear error
+- both `instance` and `database` absent => clear error
+- invalid physical database name => clear error
 - missing explicit database plus missing config default => clear error
 - role-based account resolution still working with the new alias semantics
 - one role/account querying different physical databases on the same alias
 - no bleed between queries selecting different physical databases
-- summaries/result headers reflecting both alias and actual physical database
+- summaries/result headers reflecting both alias and actual physical database, plus a legacy marker when compatibility mode is used
 - knowledge tool remaining alias-based
 
 ## Migration Impact
@@ -259,7 +282,7 @@ For deployers:
 
 Implement in two layers:
 
-1. query contract and runtime database resolution
+1. query contract, schema updates, runtime database resolution, and resolved-database pool isolation
 2. docs/tests/comment updates for compatibility and knowledge guidance
 
 Do not change knowledge directory layout in the same patch series.
