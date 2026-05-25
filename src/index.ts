@@ -9,6 +9,7 @@ import type { Pool, PoolOptions } from "mysql2/promise";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(__dirname, "..");
 const DEFAULT_KNOWLEDGE_DIR = resolve(PLUGIN_ROOT, "knowledge");
+const DATABASE_NAME_RE = /^[A-Za-z0-9_-]+$/;
 
 interface AccountConfig {
   user: string;
@@ -34,6 +35,12 @@ interface TopicKnowledge {
   description: string;
   catalogBody: string;
   docs: Map<string, TopicDocMeta>;
+}
+
+interface ResolvedQueryTarget {
+  alias: string;
+  physicalDatabase: string;
+  legacyMode: boolean;
 }
 
 interface MySQLQueryConfig {
@@ -269,10 +276,11 @@ export default class MySQLQueryPlugin implements ToolPlugin {
     if (name === "get_topic_knowledge") {
       return `knowledge: ${input.database}/${input.doc}`;
     }
-    const db = input.database || "?";
+    const instance = input.instance || input.database || "?";
+    const maybePhysical = input.instance ? (input.database || "(default)") : "(legacy default)";
     const sql = input.sql || "";
     const preview = sql.length > 80 ? sql.slice(0, 80) + "..." : sql;
-    return `MySQL query: ${db} — ${preview}`;
+    return `MySQL query: instance=${instance} database=${maybePhysical}${input.instance ? "" : " mode=legacy"} — ${preview}`;
   }
 
   getSystemPromptAddendum(): string {
@@ -366,6 +374,38 @@ export default class MySQLQueryPlugin implements ToolPlugin {
       throw new Error(`Access denied: role ${accountKey} is not configured for database ${dbName}.`);
     }
     return db.accounts[accountKey]!;
+  }
+
+  private resolveQueryTarget(input: Record<string, any>): ResolvedQueryTarget {
+    const requestedInstance = input.instance;
+    const legacyAlias = input.database;
+
+    if (!requestedInstance && !legacyAlias) {
+      throw new Error("Query must provide instance or legacy database alias.");
+    }
+
+    // Keep accepting legacy `database=<alias>` callers so existing sessions and
+    // prompts keep working while the tool description migrates toward `instance`.
+    const alias = requestedInstance || legacyAlias;
+    const legacyMode = !requestedInstance;
+    const dbConfig = this.config.known_databases[alias];
+    if (!dbConfig) {
+      throw new Error(`Unknown database alias "${alias}".`);
+    }
+
+    // In compatibility mode, `database` was historically the alias field, so the
+    // physical database must come from config instead of the user input payload.
+    const physicalDatabase = requestedInstance
+      ? (input.database || dbConfig.database)
+      : dbConfig.database;
+    if (!physicalDatabase) {
+      throw new Error(`No target database resolved for alias "${alias}". Specify database explicitly or configure a default database.`);
+    }
+    if (!DATABASE_NAME_RE.test(physicalDatabase)) {
+      throw new Error(`Invalid physical database name "${physicalDatabase}".`);
+    }
+
+    return { alias, physicalDatabase, legacyMode };
   }
 
   private buildPoolKey(dbName: string, accountKey: string): string {
