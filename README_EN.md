@@ -11,7 +11,8 @@ MySQL database query plugin for the [Zhiliao](https://github.com/git-zhiliao/zhi
 - **Multi-database Support**: Reference configured databases by friendly names
 - **Knowledge System**: Three-layer knowledge loading — on-demand doc loading saves tokens
 - **Role-based DB Accounts**: A single database alias can map to different query accounts by `role`
-- **Connection Pooling**: Independent pool per database-alias and role pair with automatic lifecycle management
+- **Runtime Database Selection**: Config keys represent connection aliases; the physical database can be chosen at query time with `instance + optional database`
+- **Connection Pooling**: Independent pool per database-alias, role, and physical-database combination with automatic lifecycle management
 
 ## Tools Provided
 
@@ -86,7 +87,7 @@ known_databases:
   my_app:
     host: "127.0.0.1"
     port: 3306
-    database: "my_app_db"
+    database: "my_app_db"   # optional default physical database
     accounts:
       default:
         user: "${MYSQL_USER}"
@@ -100,10 +101,30 @@ known_databases:
 
 Notes:
 
+- `known_databases.<key>` uses `<key>` as the connection alias, not as a fixed physical database name
+- Config `database` is only the default physical database; queries may explicitly target another physical database
 - `accounts.default` is used when no role is present in the request context
 - If Zhiliao passes a `role`, the plugin looks for `accounts.<role>` first
 - If the role is not `default` and no matching account exists, the query is rejected; it does not silently downgrade to `default`
 - Legacy top-level `user/password` has been removed and must be migrated to `accounts.default`
+
+Preferred query shape:
+
+```json
+{ "instance": "doris", "database": "wizard", "sql": "SELECT COUNT(*) FROM pay_users" }
+```
+
+Legacy-compatible query shape:
+
+```json
+{ "database": "doris", "sql": "SELECT COUNT(*) FROM pay_users" }
+```
+
+Additional notes:
+
+- In the new shape, `instance` means the connection alias and `database` means the physical target database for this query
+- In the legacy shape, `database=<alias>` still works, but the physical database can only come from the configured default `database`
+- The code keeps a few compatibility comments on purpose because the transition period has two meanings for `database`, and that is otherwise easy to misread
 
 ### Verification
 
