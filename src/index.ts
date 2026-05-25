@@ -1,7 +1,7 @@
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import type { ToolPlugin, ToolDefinition } from "../../../src/agent/tool-plugin.js";
+import type { ToolPlugin, ToolDefinition, RequestContext } from "../../../src/agent/tool-plugin.js";
 
 import mysql from "mysql2/promise";
 import type { Pool, PoolOptions } from "mysql2/promise";
@@ -9,15 +9,20 @@ import type { Pool, PoolOptions } from "mysql2/promise";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(__dirname, "..");
 const DEFAULT_KNOWLEDGE_DIR = resolve(PLUGIN_ROOT, "knowledge");
+const DATABASE_NAME_RE = /^[A-Za-z0-9_-]+$/;
+
+interface AccountConfig {
+  user: string;
+  password: string;
+}
 
 interface DatabaseConfig {
   host: string;
   port?: number;
-  user: string;
-  password: string;
-  database: string;
+  database?: string;
   connect_timeout?: number;
   query_timeout?: number;
+  accounts: Record<string, AccountConfig>;
 }
 
 interface TopicDocMeta {
@@ -30,6 +35,12 @@ interface TopicKnowledge {
   description: string;
   catalogBody: string;
   docs: Map<string, TopicDocMeta>;
+}
+
+interface ResolvedQueryTarget {
+  alias: string;
+  physicalDatabase: string;
+  legacyMode: boolean;
 }
 
 interface MySQLQueryConfig {
@@ -83,14 +94,25 @@ export default class MySQLQueryPlugin implements ToolPlugin {
     }
 
     for (const [name, db] of Object.entries(config.known_databases as Record<string, DatabaseConfig>)) {
-      if (!db.host || !db.user) {
-        throw new Error(`Database "${name}" missing required fields (host, user)`);
+      if (!db.host) {
+        throw new Error(`Database "${name}" missing required field (host)`);
       }
-      if (db.password && db.password.startsWith("${")) {
-        throw new Error(`Database "${name}": password env var not resolved — check environment variables`);
+      if ((db as any).user || (db as any).password) {
+        throw new Error(`Database "${name}" still uses legacy top-level user/password. Migrate to accounts.default.`);
       }
-      if (db.user.startsWith("${")) {
-        throw new Error(`Database "${name}": user env var not resolved — check environment variables`);
+      if (!db.accounts || Object.keys(db.accounts).length === 0) {
+        throw new Error(`Database "${name}" must define accounts.default and any role-specific accounts`);
+      }
+      if (!db.accounts.default) {
+        throw new Error(`Database "${name}" missing required accounts.default`);
+      }
+      for (const [accountKey, account] of Object.entries(db.accounts)) {
+        if (!account.user || !account.password) {
+          throw new Error(`Database "${name}" account "${accountKey}" missing required fields (user, password)`);
+        }
+        if (account.password.startsWith("${") || account.user.startsWith("${")) {
+          throw new Error(`Database "${name}" account "${accountKey}": env var not resolved — check environment variables`);
+        }
       }
     }
 
@@ -98,7 +120,6 @@ export default class MySQLQueryPlugin implements ToolPlugin {
     if (this.config.knowledge_dir) {
       this.knowledgeDir = this.config.knowledge_dir;
     }
-    this.initPools();
     this.loadKnowledge();
   }
 
@@ -107,29 +128,10 @@ export default class MySQLQueryPlugin implements ToolPlugin {
       try {
         await pool.end();
       } catch (err: any) {
-        console.error(`Error closing pool for "${name}": ${err.message}`);
+        console.error(`Error closing pool for "${this.describePoolKey(name)}": ${err.message}`);
       }
     }
     this.pools.clear();
-  }
-
-  private initPools(): void {
-    for (const [name, db] of Object.entries(this.config.known_databases)) {
-      const opts: PoolOptions = {
-        host: db.host,
-        port: db.port || 3306,
-        user: db.user,
-        password: db.password,
-        database: db.database,
-        connectTimeout: db.connect_timeout || 10000,
-        waitForConnections: true,
-        connectionLimit: 3,
-        maxIdle: 1,
-        idleTimeout: 60000,
-        enableKeepAlive: true,
-      };
-      this.pools.set(name, mysql.createPool(opts));
-    }
   }
 
   private loadKnowledge(): void {
@@ -190,6 +192,9 @@ export default class MySQLQueryPlugin implements ToolPlugin {
         description: [
           "Execute a read-only SQL query against a configured MySQL database.",
           "Only SELECT, SHOW, DESCRIBE, and EXPLAIN statements are allowed.",
+          "Use `instance` for the configured connection alias.",
+          "Use optional `database` for the physical target database/schema.",
+          "Legacy callers may still send `database=<alias>`, but new callers should prefer `instance + database`.",
           "",
           "Known databases:",
           dbList,
@@ -199,9 +204,13 @@ export default class MySQLQueryPlugin implements ToolPlugin {
         input_schema: {
           type: "object",
           properties: {
+            instance: {
+              type: "string",
+              description: "Configured connection alias. Preferred for new callers.",
+            },
             database: {
               type: "string",
-              description: "Known database name (must match a key in known_databases config)",
+              description: "Physical database/schema when used with `instance`; legacy callers may still send the alias here when `instance` is omitted.",
             },
             sql: {
               type: "string",
@@ -213,7 +222,7 @@ export default class MySQLQueryPlugin implements ToolPlugin {
               default: 100,
             },
           },
-          required: ["database", "sql"],
+          required: ["sql"],
         },
       },
     ];
@@ -231,6 +240,7 @@ export default class MySQLQueryPlugin implements ToolPlugin {
         name: "get_topic_knowledge",
         description: [
           "Load a detailed knowledge document for a MySQL database. Use this before writing complex queries to get schema details, query patterns, and analysis recipes.",
+          "For this tool, `database` still means the configured alias used by the knowledge directory.",
           "",
           "Available docs:",
           availableDocs || "  (none)",
@@ -255,10 +265,10 @@ export default class MySQLQueryPlugin implements ToolPlugin {
     return tools;
   }
 
-  async executeTool(name: string, input: Record<string, any>): Promise<string> {
+  async executeTool(name: string, input: Record<string, any>, context?: RequestContext): Promise<string> {
     switch (name) {
       case "query":
-        return this.executeQuery(input);
+        return this.executeQuery(input, context);
       case "get_topic_knowledge":
         return this.getTopicKnowledge(input);
       default:
@@ -274,10 +284,11 @@ export default class MySQLQueryPlugin implements ToolPlugin {
     if (name === "get_topic_knowledge") {
       return `knowledge: ${input.database}/${input.doc}`;
     }
-    const db = input.database || "?";
+    const instance = input.instance || input.database || "?";
+    const maybePhysical = input.instance ? (input.database || "(default)") : "(legacy default)";
     const sql = input.sql || "";
     const preview = sql.length > 80 ? sql.slice(0, 80) + "..." : sql;
-    return `MySQL query: ${db} — ${preview}`;
+    return `MySQL query: instance=${instance} database=${maybePhysical}${input.instance ? "" : " mode=legacy"} — ${preview}`;
   }
 
   getSystemPromptAddendum(): string {
@@ -336,17 +347,115 @@ export default class MySQLQueryPlugin implements ToolPlugin {
   getSecretPatterns(): RegExp[] {
     const patterns: RegExp[] = [];
     for (const db of Object.values(this.config.known_databases)) {
-      if (db.password && !db.password.startsWith("${")) {
-        patterns.push(new RegExp(escapeRegex(db.password), "g"));
-      }
       if (db.host) {
         patterns.push(new RegExp(escapeRegex(db.host), "g"));
       }
-      if (db.user) {
-        patterns.push(new RegExp(escapeRegex(db.user), "g"));
+      for (const account of Object.values(db.accounts)) {
+        patterns.push(new RegExp(escapeRegex(account.password), "g"));
+        patterns.push(new RegExp(escapeRegex(account.user), "g"));
       }
     }
     return patterns;
+  }
+
+  private resolveAccountKey(dbName: string, context?: RequestContext): string {
+    const db = this.config.known_databases[dbName];
+    if (!db) {
+      throw new Error(`Unknown database "${dbName}"`);
+    }
+
+    const role = context?.role;
+    if (!role) {
+      return "default";
+    }
+
+    if (Object.hasOwn(db.accounts, role)) {
+      return role;
+    }
+
+    throw new Error(`Access denied: role ${role} is not configured for database ${dbName}.`);
+  }
+
+  private getAccountConfig(dbName: string, accountKey: string): AccountConfig {
+    const db = this.config.known_databases[dbName];
+    if (!db || !Object.hasOwn(db.accounts, accountKey)) {
+      throw new Error(`Access denied: role ${accountKey} is not configured for database ${dbName}.`);
+    }
+    return db.accounts[accountKey]!;
+  }
+
+  private resolveQueryTarget(input: Record<string, any>): ResolvedQueryTarget {
+    const requestedInstance = input.instance;
+    const legacyAlias = input.database;
+
+    if (!requestedInstance && !legacyAlias) {
+      throw new Error("Query must provide instance or legacy database alias.");
+    }
+
+    // Keep accepting legacy `database=<alias>` callers so existing sessions and
+    // prompts keep working while the tool description migrates toward `instance`.
+    const alias = requestedInstance || legacyAlias;
+    const legacyMode = !requestedInstance;
+    const dbConfig = this.config.known_databases[alias];
+    if (!dbConfig) {
+      throw new Error(`Unknown database alias "${alias}".`);
+    }
+
+    // In compatibility mode, `database` was historically the alias field, so the
+    // physical database must come from config instead of the user input payload.
+    const physicalDatabase = requestedInstance
+      ? (input.database || dbConfig.database)
+      : dbConfig.database;
+    if (!physicalDatabase) {
+      throw new Error(`No target database resolved for alias "${alias}". Specify database explicitly or configure a default database.`);
+    }
+    if (!DATABASE_NAME_RE.test(physicalDatabase)) {
+      throw new Error(`Invalid physical database name "${physicalDatabase}".`);
+    }
+
+    return { alias, physicalDatabase, legacyMode };
+  }
+
+  private buildPoolKey(alias: string, accountKey: string, physicalDatabase: string): string {
+    return `${alias}\u0000${accountKey}\u0000${physicalDatabase}`;
+  }
+
+  private describePoolKey(poolKey: string): string {
+    const [alias, accountKey, physicalDatabase] = poolKey.split("\u0000");
+    if (!accountKey || !physicalDatabase) {
+      return poolKey;
+    }
+    return `${alias} (role=${accountKey}, database=${physicalDatabase})`;
+  }
+
+  private getOrCreatePool(alias: string, accountKey: string, physicalDatabase: string): Pool {
+    const poolKey = this.buildPoolKey(alias, accountKey, physicalDatabase);
+    const existing = this.pools.get(poolKey);
+    if (existing) {
+      return existing;
+    }
+
+    const db = this.config.known_databases[alias];
+    if (!db) {
+      throw new Error(`Unknown database alias "${alias}".`);
+    }
+    const account = this.getAccountConfig(alias, accountKey);
+    const opts: PoolOptions = {
+      host: db.host,
+      port: db.port || 3306,
+      user: account.user,
+      password: account.password,
+      database: physicalDatabase,
+      connectTimeout: db.connect_timeout || 10000,
+      waitForConnections: true,
+      connectionLimit: 3,
+      maxIdle: 1,
+      idleTimeout: 60000,
+      enableKeepAlive: true,
+    };
+    const pool = mysql.createPool(opts);
+    this.pools.set(poolKey, pool);
+    return pool;
   }
 
   private getTopicKnowledge(input: Record<string, any>): string {
@@ -372,26 +481,24 @@ export default class MySQLQueryPlugin implements ToolPlugin {
     }
   }
 
-  private async executeQuery(input: Record<string, any>): Promise<string> {
+  private async executeQuery(input: Record<string, any>, context?: RequestContext): Promise<string> {
     try {
-      const dbName: string = input.database;
+      const target = this.resolveQueryTarget(input);
       const sql: string = input.sql;
       const limit: number = Math.min(input.limit || 100, 1000);
-
-      const pool = this.pools.get(dbName);
-      if (!pool) {
-        const available = Array.from(this.pools.keys()).join(", ");
-        return `Unknown database "${dbName}". Available: ${available}`;
-      }
 
       if (!isReadOnlyQuery(sql)) {
         return "Error: Only read-only queries are allowed (SELECT, SHOW, DESCRIBE, DESC, EXPLAIN, WITH). Write operations are blocked for safety.";
       }
 
+      const accountKey = this.resolveAccountKey(target.alias, context);
+      const requestedRole = context?.role || "default";
+      console.log(
+        `[mysql-query] query logId=${context?.logId || "-"} requestedRole=${requestedRole} account=${accountKey} instance=${target.alias} database=${target.physicalDatabase} mode=${target.legacyMode ? "legacy" : "instance"}`,
+      );
+      const pool = this.getOrCreatePool(target.alias, accountKey, target.physicalDatabase);
       const finalSql = this.applyLimit(sql, limit);
-
-      const dbConfig = this.config.known_databases[dbName];
-      const timeoutMs = dbConfig.query_timeout || 30000;
+      const timeoutMs = this.config.known_databases[target.alias].query_timeout || 30000;
 
       const [rows, fields] = await pool.query({ sql: finalSql, timeout: timeoutMs });
 
@@ -409,7 +516,9 @@ export default class MySQLQueryPlugin implements ToolPlugin {
 
       const header = [
         `## SQL Used (MUST include in your answer)`,
-        `database: ${dbName}`,
+        `instance: ${target.alias}`,
+        `database: ${target.physicalDatabase}`,
+        `mode: ${target.legacyMode ? "legacy" : "instance"}`,
         `sql: ${finalSql}`,
         `rows: ${rows.length}`,
         ``,

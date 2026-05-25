@@ -10,7 +10,9 @@ MySQL 数据库查询插件，为[知了](https://github.com/git-zhiliao/zhiliao
 - **自动 LIMIT**：未指定 LIMIT 的 SELECT 语句自动添加（默认 100，最大 1000），防止全表扫描
 - **多数据库支持**：通过友好名称引用已配置的数据库，无需记忆连接信息
 - **知识库系统**：三层知识加载机制，按需加载查询模式，节省 token 开销
-- **连接池管理**：每个数据库独立连接池，自动管理连接生命周期
+- **基于角色的数据库账号**：同一个数据库别名可按 `role` 选择不同的查询账号
+- **运行时数据库选择**：配置 key 表示连接别名，物理库可在查询时通过 `instance + optional database` 指定
+- **连接池管理**：每个数据库别名、role、物理库组合独立连接池，自动管理连接生命周期
 
 ## 提供的工具
 
@@ -47,6 +49,7 @@ mysql-query/
 - **只读强制**：只允许 `SELECT`、`SHOW`、`DESCRIBE`、`DESC`、`EXPLAIN`、`WITH`（CTE）语句
 - **写操作拦截**：`INSERT`、`UPDATE`、`DELETE`、`DROP`、`CREATE`、`ALTER`、`TRUNCATE` 等一律拒绝
 - **密码过滤**：所有数据库密码通过 secret pattern 自动脱敏，防止泄露
+- **权限兜底策略**：请求携带了非 default role 但该数据库未配置对应账号时，直接拒绝，不会自动降级到 default
 - **查询超时**：可配置每个数据库的查询超时时间（默认 30s）
 
 ---
@@ -84,12 +87,44 @@ known_databases:
   my_app:
     host: "127.0.0.1"
     port: 3306
-    user: "${MYSQL_USER}"
-    password: "${MYSQL_PASSWORD}"
-    database: "my_app_db"
+    database: "my_app_db"   # 可选默认物理库
+    accounts:
+      default:
+        user: "${MYSQL_USER}"
+        password: "${MYSQL_PASSWORD}"
+      finance_admin:
+        user: "${MYSQL_FINANCE_ADMIN_USER}"
+        password: "${MYSQL_FINANCE_ADMIN_PASSWORD}"
     # connect_timeout: 10000   # 连接超时（毫秒，默认 10000）
     # query_timeout: 30000     # 查询超时（毫秒，默认 30000）
 ```
+
+说明：
+
+- `known_databases.<key>` 里的 `<key>` 是连接别名，不是固定物理库名
+- 配置里的 `database` 只是默认物理库；查询时也可以显式指定别的物理库
+- `accounts.default` 是没有 role 时使用的默认查询账号
+- 当知了请求上下文里带了 `role` 时，插件会优先查 `accounts.<role>`
+- 若请求 role 不是 `default` 且未配置对应账号，查询会直接拒绝，不回退到 `default`
+- 旧的顶层 `user/password` 已移除，需要迁移到 `accounts.default`
+
+推荐调用方式：
+
+```json
+{ "instance": "doris", "database": "wizard", "sql": "SELECT COUNT(*) FROM pay_users" }
+```
+
+兼容旧调用：
+
+```json
+{ "database": "doris", "sql": "SELECT COUNT(*) FROM pay_users" }
+```
+
+补充说明：
+
+- 新写法里 `instance` 表示连接别名，`database` 表示本次查询要落到的物理库
+- 旧写法里只有 `database=<alias>`，此时物理库只能来自配置里的默认 `database`
+- 代码里保留了少量兼容注释，原因是过渡期同时存在两套输入语义，单看字段名容易误读
 
 环境变量通过 `export` 导出，或在 `docker-compose.yml` 的 `environment` 中配置。
 

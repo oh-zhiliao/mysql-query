@@ -5,13 +5,24 @@ known_databases:
   my_app:
     host: "127.0.0.1"
     port: 3306
-    user: "${MYSQL_USER}"
-    password: "${MYSQL_PASSWORD}"
-    database: "my_app_db"
+    database: "my_app_db"   # optional default physical database
+    accounts:
+      default:
+        user: "${MYSQL_USER}"
+        password: "${MYSQL_PASSWORD}"
+      # complaint:
+      #   user: "${MYSQL_COMPLAINT_USER}"
+      #   password: "${MYSQL_COMPLAINT_PASSWORD}"
     # Optional: connection timeout in milliseconds (default: 10000)
     # connect_timeout: 10000
     # Optional: query timeout in milliseconds (default: 30000)
     # query_timeout: 30000
+
+# Query usage:
+# Preferred:
+#   { "instance": "my_app", "database": "billing", "sql": "SELECT COUNT(*) FROM invoices" }
+# Legacy compatibility:
+#   { "database": "my_app", "sql": "SELECT COUNT(*) FROM invoices" }
 
 # Optional: override the knowledge directory (absolute path). Defaults to
 # {plugin_root}/knowledge. Useful for deployments that want knowledge files

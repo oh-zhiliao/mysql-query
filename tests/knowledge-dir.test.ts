@@ -19,9 +19,13 @@ const BASE_CONFIG = {
     doris: {
       host: "10.0.0.1",
       port: 9030,
-      user: "admin",
-      password: "secret123",
       database: "warehouse",
+      accounts: {
+        default: {
+          user: "admin",
+          password: "secret123",
+        },
+      },
     },
   },
 };
@@ -57,6 +61,29 @@ describe("MySQLQueryPlugin knowledge_dir override", () => {
     const kDef = defs.find((d) => d.name === "get_topic_knowledge");
     expect(kDef).toBeDefined();
     expect(kDef!.description).toContain("schema");
+
+    const out = await plugin.executeTool("get_topic_knowledge", {
+      database: "doris",
+      doc: "schema",
+    });
+    expect(out).toContain("Schema details here");
+  });
+
+  it("keeps get_topic_knowledge alias-based after query contract changes", async () => {
+    const topicDir = join(tmpDir, "doris");
+    mkdirSync(topicDir, { recursive: true });
+    writeFileSync(
+      join(topicDir, "_catalog.md"),
+      "---\ndescription: doris warehouse\n---\nCatalog for doris\n",
+    );
+    writeFileSync(
+      join(topicDir, "schema.md"),
+      "---\ntitle: Schema\ndescription: table schema reference\n---\nSchema details here\n",
+    );
+
+    const plugin = new MySQLQueryPlugin();
+    plugin.name = "mysql-query";
+    await plugin.init({ ...structuredClone(BASE_CONFIG), knowledge_dir: tmpDir });
 
     const out = await plugin.executeTool("get_topic_knowledge", {
       database: "doris",

@@ -15,12 +15,21 @@ declare module "*/tool-plugin.js" {
     input_schema: Record<string, unknown>;
   }
 
+  export interface RequestContext {
+    channel?: "feishu" | "webchat";
+    chatType?: "p2p" | "group";
+    chatId?: string;
+    userId: string;
+    role?: string;
+    logId: string;
+  }
+
   export interface ToolPlugin {
     name: string;
     init(config: Record<string, any>): Promise<void>;
     destroy?(): Promise<void>;
     getToolDefinitions(): ToolDefinition[];
-    executeTool(name: string, input: Record<string, any>): Promise<string>;
+    executeTool(name: string, input: Record<string, any>, context?: RequestContext): Promise<string>;
     getCheapTools?(): string[];
     summarizeInput?(name: string, input: Record<string, any>): string;
     getSystemPromptAddendum?(): string;
@@ -47,6 +56,8 @@ declare module "*/tool-plugin.js" {
     chatType: "p2p" | "group";
     chatId: string;
     logId: string;
+    channel?: "feishu" | "webchat";
+    role?: string;
   }
 
   export interface PluginCommandHandler {
