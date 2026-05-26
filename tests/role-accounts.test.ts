@@ -55,6 +55,19 @@ describe("role account config validation", () => {
     await expect(plugin.init(structuredClone(NEW_CONFIG))).resolves.toBeUndefined();
   });
 
+  it("accepts aliases that only define a non-default role account", async () => {
+    await expect(plugin.init({
+      known_databases: {
+        complaint_only: {
+          host: "127.0.0.1",
+          accounts: {
+            complaint: { user: "complaint_user", password: "complaint_secret" },
+          },
+        },
+      },
+    })).resolves.toBeUndefined();
+  });
+
   it("rejects legacy top-level user/password config", async () => {
     await expect(plugin.init({
       known_databases: {
@@ -164,6 +177,27 @@ describe("role account resolution", () => {
       role: "__proto__",
       logId: "log1",
     })).toThrow(/not configured/i);
+  });
+
+  it("denies default callers when an alias has no default account", async () => {
+    const complaintOnlyPlugin = new MySQLQueryPlugin();
+    complaintOnlyPlugin.name = "mysql-query";
+    await complaintOnlyPlugin.init({
+      known_databases: {
+        complaint_only: {
+          host: "127.0.0.1",
+          accounts: {
+            complaint: { user: "complaint_user", password: "complaint_secret" },
+          },
+        },
+      },
+    });
+
+    expect(() => (complaintOnlyPlugin as any).resolveAccountKey("complaint_only", {
+      channel: "webchat",
+      userId: "u1",
+      logId: "log1",
+    })).toThrow(/default/i);
   });
 });
 

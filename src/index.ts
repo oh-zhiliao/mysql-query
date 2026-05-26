@@ -1,7 +1,12 @@
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import type { ToolPlugin, ToolDefinition, RequestContext } from "../../../src/agent/tool-plugin.js";
+import type {
+  ToolPlugin,
+  ToolDefinition,
+  RequestContext,
+  PluginCommandHandler,
+} from "../../../src/agent/tool-plugin.js";
 
 import mysql from "mysql2/promise";
 import type { Pool, PoolOptions } from "mysql2/promise";
@@ -31,10 +36,23 @@ interface TopicDocMeta {
   filePath: string;
 }
 
-interface TopicKnowledge {
+interface KnowledgeScope {
   description: string;
   catalogBody: string;
   docs: Map<string, TopicDocMeta>;
+}
+
+interface AliasKnowledgeSnapshot {
+  roleScopes: Map<string, KnowledgeScope>;
+  commonScope?: KnowledgeScope;
+}
+
+interface VisibleKnowledge {
+  role: string;
+  roleScope?: KnowledgeScope;
+  commonScope?: KnowledgeScope;
+  hasRoleCatalog: boolean;
+  hasCommonCatalog: boolean;
 }
 
 interface ResolvedQueryTarget {
@@ -45,6 +63,7 @@ interface ResolvedQueryTarget {
 
 interface MySQLQueryConfig {
   known_databases: Record<string, DatabaseConfig>;
+  allow_common_knowledge?: boolean;
   /** Absolute path override for the knowledge directory. When set, overrides the
    *  default colocated `{plugin_root}/knowledge`. Useful for deploy environments
    *  that want knowledge files isolated from the plugin source tree. */
@@ -85,7 +104,7 @@ export default class MySQLQueryPlugin implements ToolPlugin {
   name = "";
   private config!: MySQLQueryConfig;
   private pools = new Map<string, Pool>();
-  private knowledge = new Map<string, TopicKnowledge>();
+  private knowledgeByAlias = new Map<string, AliasKnowledgeSnapshot>();
   private knowledgeDir = DEFAULT_KNOWLEDGE_DIR;
 
   async init(config: Record<string, any>): Promise<void> {
@@ -100,11 +119,11 @@ export default class MySQLQueryPlugin implements ToolPlugin {
       if ((db as any).user || (db as any).password) {
         throw new Error(`Database "${name}" still uses legacy top-level user/password. Migrate to accounts.default.`);
       }
+      // Role-scoped alias visibility means some aliases may be intentionally
+      // hidden from default callers, so we only require "at least one account"
+      // instead of globally requiring accounts.default.
       if (!db.accounts || Object.keys(db.accounts).length === 0) {
-        throw new Error(`Database "${name}" must define accounts.default and any role-specific accounts`);
-      }
-      if (!db.accounts.default) {
-        throw new Error(`Database "${name}" missing required accounts.default`);
+        throw new Error(`Database "${name}" must define at least one account`);
       }
       for (const [accountKey, account] of Object.entries(db.accounts)) {
         if (!account.user || !account.password) {
@@ -120,7 +139,7 @@ export default class MySQLQueryPlugin implements ToolPlugin {
     if (this.config.knowledge_dir) {
       this.knowledgeDir = this.config.knowledge_dir;
     }
-    this.loadKnowledge();
+    this.knowledgeByAlias = this.loadKnowledgeSnapshot();
   }
 
   async destroy(): Promise<void> {
@@ -134,55 +153,89 @@ export default class MySQLQueryPlugin implements ToolPlugin {
     this.pools.clear();
   }
 
-  private loadKnowledge(): void {
-    if (!existsSync(this.knowledgeDir)) return;
+  // Knowledge is snapshotted at startup/reload time so request handling stays
+  // deterministic and we can reject broken edits without serving half-loaded state.
+  private loadKnowledgeSnapshot(): Map<string, AliasKnowledgeSnapshot> {
+    const snapshot = new Map<string, AliasKnowledgeSnapshot>();
+    if (!existsSync(this.knowledgeDir)) return snapshot;
 
-    const dbNames = Object.keys(this.config.known_databases);
-    for (const dbName of dbNames) {
-      const topicDir = join(this.knowledgeDir, dbName);
-      if (!existsSync(topicDir)) continue;
+    for (const alias of Object.keys(this.config.known_databases)) {
+      const aliasDir = join(this.knowledgeDir, alias);
+      if (!existsSync(aliasDir)) continue;
 
-      const catalogPath = join(topicDir, "_catalog.md");
-      if (!existsSync(catalogPath)) {
-        console.warn(`Knowledge dir for "${dbName}" exists but missing _catalog.md, skipping`);
-        continue;
+      const aliasSnapshot: AliasKnowledgeSnapshot = {
+        roleScopes: new Map<string, KnowledgeScope>(),
+      };
+
+      const commonScope = this.readKnowledgeScope(alias, join(aliasDir, "common"), "common");
+      if (commonScope) {
+        aliasSnapshot.commonScope = commonScope;
       }
 
-      const catalogContent = readFileSync(catalogPath, "utf-8");
-      const { meta, body } = parseFrontmatter(catalogContent);
-
-      const docs = new Map<string, TopicDocMeta>();
-      const entries = readdirSync(topicDir);
-      for (const entry of entries) {
-        if (!entry.endsWith(".md") || entry === "_catalog.md" || entry === "CLAUDE.md") continue;
-        const docName = entry.replace(/\.md$/, "");
-        const docPath = join(topicDir, entry);
-        const docContent = readFileSync(docPath, "utf-8");
-        const docParsed = parseFrontmatter(docContent);
-        docs.set(docName, {
-          title: docParsed.meta.title || docName,
-          description: docParsed.meta.description || "",
-          filePath: docPath,
-        });
+      const rolesDir = join(aliasDir, "roles");
+      if (existsSync(rolesDir)) {
+        for (const roleEntry of readdirSync(rolesDir, { withFileTypes: true })) {
+          if (!roleEntry.isDirectory()) continue;
+          const scope = this.readKnowledgeScope(alias, join(rolesDir, roleEntry.name), `roles/${roleEntry.name}`);
+          if (scope) {
+            aliasSnapshot.roleScopes.set(roleEntry.name, scope);
+          }
+        }
       }
 
-      this.knowledge.set(dbName, {
-        description: meta.description || "",
-        catalogBody: body.trim(),
-        docs,
-      });
-
-      console.log(`  Knowledge loaded for "${dbName}": catalog + ${docs.size} docs`);
+      if (aliasSnapshot.roleScopes.size > 0 || aliasSnapshot.commonScope) {
+        snapshot.set(alias, aliasSnapshot);
+      }
     }
+
+    return snapshot;
   }
 
-  getToolDefinitions(): ToolDefinition[] {
-    const dbList = Object.entries(this.config.known_databases)
-      .map(([name, _db]) => {
-        const k = this.knowledge.get(name);
-        let line = `  - "${name}"`;
-        if (k?.description) line += ` — ${k.description}`;
-        return line;
+  private readKnowledgeScope(alias: string, scopeDir: string, scopeLabel: string): KnowledgeScope | undefined {
+    if (!existsSync(scopeDir)) return undefined;
+
+    const entries = readdirSync(scopeDir, { withFileTypes: true });
+    const docEntries = entries.filter((entry) =>
+      entry.isFile() && entry.name.endsWith(".md") && entry.name !== "_catalog.md" && entry.name !== "CLAUDE.md"
+    );
+    const catalogPath = join(scopeDir, "_catalog.md");
+
+    if (!existsSync(catalogPath)) {
+      if (docEntries.length === 0) return undefined;
+      throw new Error(`Knowledge scope "${alias}/${scopeLabel}" is invalid: missing _catalog.md`);
+    }
+
+    const catalogContent = readFileSync(catalogPath, "utf-8");
+    const { meta, body } = parseFrontmatter(catalogContent);
+    const docs = new Map<string, TopicDocMeta>();
+
+    for (const entry of docEntries) {
+      const docName = entry.name.replace(/\.md$/, "");
+      const docPath = join(scopeDir, entry.name);
+      const docContent = readFileSync(docPath, "utf-8");
+      const docParsed = parseFrontmatter(docContent);
+      docs.set(docName, {
+        title: docParsed.meta.title || docName,
+        description: docParsed.meta.description || "",
+        filePath: docPath,
+      });
+    }
+
+    return {
+      description: meta.description || "",
+      catalogBody: body.trim(),
+      docs,
+    };
+  }
+
+  getToolDefinitions(context?: RequestContext): ToolDefinition[] {
+    const visibleAliases = this.getVisibleAliases(context);
+    const dbList = visibleAliases
+      .map((alias) => {
+        const visible = this.resolveVisibleKnowledge(alias, context);
+        const description = visible.roleScope?.description || visible.commonScope?.description || "configured database alias";
+        this.logKnowledgeVisibility(alias, visible);
+        return `  - "${alias}" — ${description}`;
       })
       .join("\n");
 
@@ -197,7 +250,7 @@ export default class MySQLQueryPlugin implements ToolPlugin {
           "Legacy callers may still send `database=<alias>`, but new callers should prefer `instance + database`.",
           "",
           "Known databases:",
-          dbList,
+          dbList || "  (none visible)",
           "",
           "Use get_topic_knowledge to load detailed schema info and query patterns before writing complex queries.",
         ].join("\n"),
@@ -227,15 +280,23 @@ export default class MySQLQueryPlugin implements ToolPlugin {
       },
     ];
 
-    if (this.knowledge.size > 0) {
-      const availableDocs = Array.from(this.knowledge.entries())
-        .flatMap(([topic, k]) =>
-          Array.from(k.docs.entries()).map(([doc, meta]) =>
-            `  - database="${topic}", doc="${doc}": ${meta.description || meta.title}`
-          )
-        )
-        .join("\n");
+    const availableDocs = visibleAliases
+      .flatMap((alias) => {
+        const visible = this.resolveVisibleKnowledge(alias, context);
+        const docs = new Map<string, TopicDocMeta>();
+        for (const [docName, docMeta] of visible.commonScope?.docs ?? []) {
+          docs.set(docName, docMeta);
+        }
+        for (const [docName, docMeta] of visible.roleScope?.docs ?? []) {
+          docs.set(docName, docMeta);
+        }
+        return Array.from(docs.entries()).map(([doc, meta]) =>
+          `  - database="${alias}", doc="${doc}": ${meta.description || meta.title}`
+        );
+      })
+      .join("\n");
 
+    if (availableDocs) {
       tools.push({
         name: "get_topic_knowledge",
         description: [
@@ -270,7 +331,7 @@ export default class MySQLQueryPlugin implements ToolPlugin {
       case "query":
         return this.executeQuery(input, context);
       case "get_topic_knowledge":
-        return this.getTopicKnowledge(input);
+        return this.getTopicKnowledge(input, context);
       default:
         return `Unknown tool: ${name}`;
     }
@@ -291,7 +352,7 @@ export default class MySQLQueryPlugin implements ToolPlugin {
     return `MySQL query: instance=${instance} database=${maybePhysical}${input.instance ? "" : " mode=legacy"} — ${preview}`;
   }
 
-  getSystemPromptAddendum(): string {
+  getSystemPromptAddendum(context?: RequestContext): string {
     const lines: string[] = [
       "## MySQL Query Plugin",
       "",
@@ -326,18 +387,24 @@ export default class MySQLQueryPlugin implements ToolPlugin {
       "- If a user asks about connection info, say it is managed by the system",
     );
 
-    if (this.knowledge.size > 0) {
+    const visibleAliases = this.getVisibleAliases(context);
+    const visibleCatalogs = visibleAliases
+      .map((alias) => ({ alias, visible: this.resolveVisibleKnowledge(alias, context) }))
+      .filter(({ alias, visible }) => {
+        this.logKnowledgeVisibility(alias, visible);
+        return Boolean(visible.roleScope?.catalogBody || visible.commonScope?.catalogBody);
+      });
+
+    if (visibleCatalogs.length > 0) {
       lines.push("", "### Known Databases");
-      for (const [dbName, k] of this.knowledge.entries()) {
-        lines.push("", `**${dbName}**`);
-        if (k.catalogBody) {
-          lines.push(k.catalogBody);
+      for (const { alias, visible } of visibleCatalogs) {
+        lines.push("", `**${alias}**`);
+        if (visible.roleScope?.catalogBody) {
+          lines.push(visible.roleScope.catalogBody);
         }
-      }
-    } else {
-      lines.push("", "### Known Databases", "");
-      for (const [name, _db] of Object.entries(this.config.known_databases)) {
-        lines.push(`- **${name}**`);
+        if (visible.commonScope?.catalogBody) {
+          lines.push(visible.commonScope.catalogBody);
+        }
       }
     }
 
@@ -358,6 +425,48 @@ export default class MySQLQueryPlugin implements ToolPlugin {
     return patterns;
   }
 
+  getCommandHandlers(): PluginCommandHandler {
+    return {
+      subcommands: {
+        "reload-knowledge": {
+          description: "Reload role-scoped knowledge from disk",
+          handle: async (_args, context) => {
+            if (!context.isAdmin) {
+              return "Only admins can run /mysql-query reload-knowledge.";
+            }
+            console.log(`[mysql-query] knowledge reload started: by=${context.userId}`);
+            try {
+              const stats = this.reloadKnowledge();
+              console.log(
+                `[mysql-query] knowledge reload finished: aliases=${stats.aliases} roleScopes=${stats.roleScopes} commonScopes=${stats.commonScopes}`,
+              );
+              return `Knowledge reloaded: aliases=${stats.aliases}, role_scopes=${stats.roleScopes}, common_scopes=${stats.commonScopes}`;
+            } catch (err: any) {
+              console.log(`[mysql-query] knowledge reload failed: by=${context.userId} error=${err.message}`);
+              return `Knowledge reload failed: ${err.message}`;
+            }
+          },
+        },
+      },
+    };
+  }
+
+  private reloadKnowledge(): { aliases: number; roleScopes: number; commonScopes: number } {
+    const next = this.loadKnowledgeSnapshot();
+    this.knowledgeByAlias = next;
+    return this.countKnowledgeScopes(next);
+  }
+
+  private countKnowledgeScopes(snapshot: Map<string, AliasKnowledgeSnapshot>) {
+    let roleScopes = 0;
+    let commonScopes = 0;
+    for (const aliasKnowledge of snapshot.values()) {
+      roleScopes += aliasKnowledge.roleScopes.size;
+      if (aliasKnowledge.commonScope) commonScopes++;
+    }
+    return { aliases: snapshot.size, roleScopes, commonScopes };
+  }
+
   private resolveAccountKey(dbName: string, context?: RequestContext): string {
     const db = this.config.known_databases[dbName];
     if (!db) {
@@ -366,6 +475,9 @@ export default class MySQLQueryPlugin implements ToolPlugin {
 
     const role = context?.role;
     if (!role) {
+      if (!db.accounts.default) {
+        throw new Error(`Access denied: default role is not configured for database ${dbName}.`);
+      }
       return "default";
     }
 
@@ -458,20 +570,55 @@ export default class MySQLQueryPlugin implements ToolPlugin {
     return pool;
   }
 
-  private getTopicKnowledge(input: Record<string, any>): string {
-    const dbName: string = input.database;
-    const docName: string = input.doc;
+  private getVisibleAliases(context?: RequestContext): string[] {
+    const role = context?.role ?? "default";
+    return Object.entries(this.config.known_databases)
+      .filter(([, db]) => role === "default" ? Boolean(db.accounts.default) : Object.hasOwn(db.accounts, role))
+      .map(([alias]) => alias);
+  }
 
-    const topicKnowledge = this.knowledge.get(dbName);
-    if (!topicKnowledge) {
-      const available = Array.from(this.knowledge.keys()).join(", ");
-      return `No knowledge found for database "${dbName}". Available databases with knowledge: ${available || "(none)"}`;
+  private resolveVisibleKnowledge(alias: string, context?: RequestContext): VisibleKnowledge {
+    const role = context?.role ?? "default";
+    const aliasKnowledge = this.knowledgeByAlias.get(alias);
+    const roleScope = aliasKnowledge?.roleScopes.get(role);
+    const commonScope = this.config.allow_common_knowledge ? aliasKnowledge?.commonScope : undefined;
+    return {
+      role,
+      roleScope,
+      commonScope,
+      hasRoleCatalog: Boolean(aliasKnowledge?.roleScopes.has(role)),
+      hasCommonCatalog: Boolean(aliasKnowledge?.commonScope),
+    };
+  }
+
+  private logKnowledgeVisibility(alias: string, visible: VisibleKnowledge): void {
+    const visibleDocCount = (visible.roleScope?.docs.size ?? 0) + (visible.commonScope?.docs.size ?? 0);
+    if (visible.roleScope || visible.commonScope) {
+      const scope = visible.roleScope && visible.commonScope ? "mixed" : visible.roleScope ? "role" : "common";
+      console.log(`[mysql-query] knowledge resolved: role=${visible.role} alias=${alias} scope=${scope} docs=${visibleDocCount}`);
+      return;
     }
 
-    const docMeta = topicKnowledge.docs.get(docName);
+    const reason = !visible.hasRoleCatalog
+      ? (visible.hasCommonCatalog && !this.config.allow_common_knowledge ? "common_disabled" : "no_role_catalog")
+      : "empty_scope";
+    console.log(
+      `[mysql-query] knowledge missing: role=${visible.role} alias=${alias} hasRoleCatalog=${visible.hasRoleCatalog ? "true" : "false"} hasCommonCatalog=${visible.hasCommonCatalog ? "true" : "false"} allowCommon=${this.config.allow_common_knowledge ? "true" : "false"} reason=${reason}`,
+    );
+  }
+
+  private getTopicKnowledge(input: Record<string, any>, context?: RequestContext): string {
+    const alias: string = input.database;
+    const docName: string = input.doc;
+    const visible = this.resolveVisibleKnowledge(alias, context);
+    this.logKnowledgeVisibility(alias, visible);
+
+    const docMeta = visible.roleScope?.docs.get(docName) || visible.commonScope?.docs.get(docName);
     if (!docMeta) {
-      const available = Array.from(topicKnowledge.docs.keys()).join(", ");
-      return `No doc "${docName}" for database "${dbName}". Available docs: ${available || "(none)"}`;
+      console.log(
+        `[mysql-query] knowledge denied: role=${visible.role} alias=${alias} doc=${docName} allowCommon=${this.config.allow_common_knowledge ? "true" : "false"}`,
+      );
+      return `No knowledge document is available for alias "${alias}" under role "${visible.role}".`;
     }
 
     try {

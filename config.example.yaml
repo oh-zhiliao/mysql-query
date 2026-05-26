@@ -1,6 +1,11 @@
 # Known databases: friendly name -> connection config
-# Database knowledge (schema, conventions, query patterns) lives in knowledge/{db_name}/
+# Role-scoped database knowledge lives in:
+#   knowledge/{alias}/roles/{role}/...
+# Optional shared knowledge lives in:
+#   knowledge/{alias}/common/...
 # See knowledge/CLAUDE.md for the authoring guide
+allow_common_knowledge: false
+
 known_databases:
   my_app:
     host: "127.0.0.1"
@@ -10,9 +15,9 @@ known_databases:
       default:
         user: "${MYSQL_USER}"
         password: "${MYSQL_PASSWORD}"
-      # complaint:
-      #   user: "${MYSQL_COMPLAINT_USER}"
-      #   password: "${MYSQL_COMPLAINT_PASSWORD}"
+      complaint:
+        user: "${MYSQL_COMPLAINT_USER}"
+        password: "${MYSQL_COMPLAINT_PASSWORD}"
     # Optional: connection timeout in milliseconds (default: 10000)
     # connect_timeout: 10000
     # Optional: query timeout in milliseconds (default: 30000)
@@ -28,3 +33,7 @@ known_databases:
 # {plugin_root}/knowledge. Useful for deployments that want knowledge files
 # isolated from the plugin source tree (e.g. /var/lib/zhiliao/knowledge/mysql-query).
 # knowledge_dir: "/absolute/path/to/knowledge"
+
+# Knowledge changes require either:
+#   /mysql-query reload-knowledge
+# or an agent restart.

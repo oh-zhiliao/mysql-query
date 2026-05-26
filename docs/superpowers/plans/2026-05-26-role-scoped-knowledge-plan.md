@@ -287,6 +287,19 @@ git commit -m "feat: expose admin flag to plugin commands"
 
 - [ ] **Step 1: Write the failing role-knowledge test for alias visibility and prompt isolation**
 
+Also define the shared test helper in the new test file:
+
+```ts
+async function initPluginWithKnowledge(options: {
+  allow_common_knowledge?: boolean;
+  known_databases: Record<string, any>;
+  knowledgeTree: Record<string, any>;
+}): Promise<MySQLQueryPlugin> {
+  // Creates a temp knowledge root, writes the requested tree, inits the plugin,
+  // and returns both the plugin and temp helpers where needed by reload tests.
+}
+```
+
 ```ts
 it("only exposes aliases and catalog content visible to the current role", async () => {
   const plugin = await initPluginWithKnowledge({
@@ -369,7 +382,60 @@ it("denies docs outside the visible role scope and logs why knowledge is missing
 });
 ```
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [ ] **Step 3: Write the failing tests for role-only aliases and unmigrated-knowledge fallback**
+
+```ts
+it("allows aliases that only have a non-default account and only exposes them to that role", async () => {
+  const plugin = await initPluginWithKnowledge({
+    known_databases: {
+      complaint_only: {
+        host: "127.0.0.1",
+        accounts: {
+          complaint: { user: "complaint", password: "secret2" },
+        },
+      },
+    },
+    knowledgeTree: {
+      complaint_only: {
+        roles: {
+          complaint: {
+            catalog: "---\ndescription: complaint-only\n---",
+            docs: { "complaint-only.md": "---\ntitle: Complaint Only\n---" },
+          },
+        },
+      },
+    },
+  });
+
+  expect(JSON.stringify(plugin.getToolDefinitions({ userId: "u1", role: "complaint", logId: "log1" }))).toContain("complaint_only");
+  expect(JSON.stringify(plugin.getToolDefinitions({ userId: "u1", role: "default", logId: "log2" }))).not.toContain("complaint_only");
+});
+
+it("keeps visible aliases queryable with generic descriptions before knowledge migration and logs why", async () => {
+  const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  const plugin = await initPluginWithKnowledge({
+    known_databases: {
+      doris: {
+        host: "127.0.0.1",
+        database: "wizard",
+        accounts: {
+          default: { user: "readonly", password: "secret1" },
+        },
+      },
+    },
+    knowledgeTree: {},
+  });
+
+  const defs = plugin.getToolDefinitions({ userId: "u1", role: "default", logId: "log1" });
+  const addendum = plugin.getSystemPromptAddendum?.({ userId: "u1", role: "default", logId: "log1" }) ?? "";
+
+  expect(JSON.stringify(defs)).toContain("configured database alias");
+  expect(addendum).not.toContain("doris");
+  expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("knowledge missing"));
+});
+```
+
+- [ ] **Step 4: Run tests to verify they fail**
 
 Run:
 
@@ -380,7 +446,7 @@ npm test -- tests/role-knowledge.test.ts tests/role-accounts.test.ts
 
 Expected: FAIL because current plugin uses startup-global knowledge and request-agnostic metadata.
 
-- [ ] **Step 4: Implement the role-scoped knowledge snapshot**
+- [ ] **Step 5: Implement the role-scoped knowledge snapshot and validation**
 
 ```ts
 interface KnowledgeScope {
@@ -398,7 +464,8 @@ private knowledgeByAlias = new Map<string, AliasKnowledgeSnapshot>();
 
 private loadKnowledgeSnapshot(): Map<string, AliasKnowledgeSnapshot> {
   const snapshot = new Map<string, AliasKnowledgeSnapshot>();
-  // Read knowledge/<alias>/roles/<role>/_catalog.md and optional common/_catalog.md
+  // Read knowledge/<alias>/roles/<role>/_catalog.md and optional common/_catalog.md.
+  // Reject scopes that contain markdown docs but omit the required scope catalog.
   // Build only in-memory scopes; do not inject deprecated top-level catalog content.
   return snapshot;
 }
@@ -414,7 +481,18 @@ private resolveVisibleKnowledge(alias: string, context?: RequestContext) {
 }
 ```
 
-- [ ] **Step 5: Implement request-aware metadata and prompt building**
+- [ ] **Step 6: Add the missing visibility helper and request-aware metadata/prompt building**
+
+```ts
+private getVisibleAliases(context?: RequestContext): string[] {
+  const role = context?.role ?? "default";
+  return Object.entries(this.config.known_databases)
+    .filter(([, db]) => role === "default"
+      ? Boolean(db.accounts.default)
+      : Object.hasOwn(db.accounts, role))
+    .map(([alias]) => alias);
+}
+```
 
 ```ts
 getToolDefinitions(context?: RequestContext): ToolDefinition[] {
@@ -422,6 +500,11 @@ getToolDefinitions(context?: RequestContext): ToolDefinition[] {
   const dbList = visibleAliases.map((alias) => {
     const { roleScope, commonScope } = this.resolveVisibleKnowledge(alias, context);
     const description = roleScope?.description || commonScope?.description || "configured database alias";
+    if (!roleScope && !commonScope) {
+      console.log(`[mysql-query] knowledge missing: role=${context?.role ?? "default"} alias=${alias} hasRoleCatalog=false hasCommonCatalog=${this.hasCommonCatalog(alias) ? "true" : "false"} allowCommon=${this.config.allow_common_knowledge ? "true" : "false"} reason=${this.hasCommonCatalog(alias) && !this.config.allow_common_knowledge ? "common_disabled" : "no_role_catalog"}`);
+    } else {
+      console.log(`[mysql-query] knowledge resolved: role=${context?.role ?? "default"} alias=${alias} scope=${roleScope && commonScope ? "mixed" : roleScope ? "role" : "common"} docs=${(roleScope?.docs.size ?? 0) + (commonScope?.docs.size ?? 0)}`);
+    }
     return `  - "${alias}" — ${description}`;
   }).join("\n");
   // return query + get_topic_knowledge definitions
@@ -439,7 +522,7 @@ getSystemPromptAddendum(context?: RequestContext): string {
 }
 ```
 
-- [ ] **Step 6: Make `get_topic_knowledge` request-aware**
+- [ ] **Step 7: Make `get_topic_knowledge` request-aware and fix the executeTool dispatch**
 
 ```ts
 private getTopicKnowledge(input: Record<string, any>, context?: RequestContext): string {
@@ -457,7 +540,31 @@ private getTopicKnowledge(input: Record<string, any>, context?: RequestContext):
 }
 ```
 
-- [ ] **Step 7: Update standalone type shim**
+```ts
+async executeTool(name: string, input: Record<string, any>, context?: RequestContext): Promise<string> {
+  switch (name) {
+    case "get_topic_knowledge":
+      return this.getTopicKnowledge(input, context);
+    // ...
+  }
+}
+```
+
+- [ ] **Step 8: Relax account validation to allow role-only aliases**
+
+```ts
+if (!db.accounts || Object.keys(db.accounts).length === 0) {
+  throw new Error(`Database "${name}" must define at least one account`);
+}
+```
+
+Document in code comments why `accounts.default` is no longer globally required:
+
+- role-scoped alias visibility is based on matching role accounts
+- default and legacy callers still require `accounts.default`
+- this keeps role-only aliases possible without weakening runtime enforcement
+
+- [ ] **Step 9: Update standalone type shim**
 
 ```ts
 // types/plugin-core.d.ts
@@ -475,7 +582,7 @@ export interface CommandCallContext {
 }
 ```
 
-- [ ] **Step 8: Run focused plugin tests**
+- [ ] **Step 10: Run focused plugin tests**
 
 Run:
 
@@ -486,7 +593,7 @@ npm test -- tests/role-knowledge.test.ts tests/role-accounts.test.ts
 
 Expected: PASS.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
 cd /home/felix021/code/zhiliao/mysql-query
@@ -503,6 +610,7 @@ git commit -m "feat: add role-scoped mysql knowledge"
 - Modify: `/home/felix021/code/zhiliao/mysql-query/tests/role-knowledge.test.ts`
 
 - [ ] **Step 1: Write the failing reload command test**
+- [ ] **Step 1: Write the failing reload command test with explicit invalid-scope validation**
 
 ```ts
 it("reloads knowledge only for admins and preserves the old snapshot on failure", async () => {
@@ -520,7 +628,7 @@ it("reloads knowledge only for admins and preserves the old snapshot on failure"
   });
   expect(denied).toMatch(/only admins/i);
 
-  writeBrokenKnowledgeTree();
+  writeBrokenKnowledgeTreeWithoutCatalog();
   const failed = await handlers!.subcommands["reload-knowledge"].handle([], {
     userId: "ou_admin",
     chatType: "p2p",
@@ -546,7 +654,7 @@ npm test -- tests/role-knowledge.test.ts
 
 Expected: FAIL because plugin has no command handlers and no atomic reload path.
 
-- [ ] **Step 3: Implement atomic reload**
+- [ ] **Step 3: Implement atomic reload with defined validation semantics**
 
 ```ts
 private swapKnowledgeSnapshot(next: Map<string, AliasKnowledgeSnapshot>): void {
@@ -560,6 +668,13 @@ private reloadKnowledge(): { aliases: number; roleScopes: number; commonScopes: 
   return stats;
 }
 ```
+
+Validation must throw when:
+
+- a `roles/<role>/` directory contains one or more `*.md` docs but no `_catalog.md`
+- a `common/` directory contains one or more `*.md` docs but no `_catalog.md`
+
+This is the contract that makes the "preserve old snapshot on failure" test meaningful.
 
 ```ts
 getCommandHandlers(): PluginCommandHandler {
@@ -684,7 +799,7 @@ Expected: PASS.
 
 ```bash
 cd /home/felix021/code/zhiliao/mysql-query
-git add README.md README_EN.md knowledge/CLAUDE.md config.example.yaml docs/superpowers/specs/2026-05-26-role-scoped-knowledge-design.md docs/superpowers/plans/2026-05-26-role-scoped-knowledge-plan.md
+git add README.md README_EN.md knowledge/CLAUDE.md config.example.yaml
 git commit -m "docs: document role-scoped mysql knowledge"
 ```
 
@@ -696,7 +811,7 @@ git commit -m "docs: document role-scoped mysql knowledge"
   - role-scoped knowledge layout: Task 3 + Task 5
   - request-aware tool description and system prompt: Task 1 + Task 3
   - `allow_common_knowledge`: Task 3 + Task 5
-  - explicit reload command: Task 2 + Task 4
+  - explicit reload command: Task 4 (with Task 2 as auth prerequisite)
   - observability logs: Task 3 + Task 4
   - docs updates: Task 5
 - Placeholder scan:

@@ -125,11 +125,11 @@ describe("mysql-query security: no connection info leakage", () => {
       expect(prompt).not.toContain("readonly_user");
     });
 
-    it("should still show database alias names", () => {
+    it("should omit alias names from the system prompt when no role-scoped knowledge is loaded", () => {
       const prompt = plugin.getSystemPromptAddendum();
 
-      expect(prompt).toContain("mydb");
-      expect(prompt).toContain("secondary");
+      expect(prompt).not.toContain("**mydb**");
+      expect(prompt).not.toContain("**secondary**");
     });
 
     it("should contain security instructions about not revealing connection details", () => {

@@ -28,11 +28,11 @@ declare module "*/tool-plugin.js" {
     name: string;
     init(config: Record<string, any>): Promise<void>;
     destroy?(): Promise<void>;
-    getToolDefinitions(): ToolDefinition[];
+    getToolDefinitions(context?: RequestContext): ToolDefinition[];
     executeTool(name: string, input: Record<string, any>, context?: RequestContext): Promise<string>;
     getCheapTools?(): string[];
     summarizeInput?(name: string, input: Record<string, any>): string;
-    getSystemPromptAddendum?(): string;
+    getSystemPromptAddendum?(context?: RequestContext): string;
     getSecretPatterns?(): RegExp[];
     filterOutput?(text: string): string;
     start?(context: PluginContext): Promise<void>;
@@ -58,6 +58,7 @@ declare module "*/tool-plugin.js" {
     logId: string;
     channel?: "feishu" | "webchat";
     role?: string;
+    isAdmin: boolean;
   }
 
   export interface PluginCommandHandler {

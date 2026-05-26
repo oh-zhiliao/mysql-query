@@ -42,7 +42,7 @@ describe("MySQLQueryPlugin knowledge_dir override", () => {
   });
 
   it("loads knowledge from the overridden directory", async () => {
-    const topicDir = join(tmpDir, "doris");
+    const topicDir = join(tmpDir, "doris", "roles", "default");
     mkdirSync(topicDir, { recursive: true });
     writeFileSync(
       join(topicDir, "_catalog.md"),
@@ -70,7 +70,7 @@ describe("MySQLQueryPlugin knowledge_dir override", () => {
   });
 
   it("keeps get_topic_knowledge alias-based after query contract changes", async () => {
-    const topicDir = join(tmpDir, "doris");
+    const topicDir = join(tmpDir, "doris", "roles", "default");
     mkdirSync(topicDir, { recursive: true });
     writeFileSync(
       join(topicDir, "_catalog.md"),
@@ -105,7 +105,7 @@ describe("MySQLQueryPlugin knowledge_dir override", () => {
   });
 
   it("exposes knowledge catalog in system prompt addendum", async () => {
-    const topicDir = join(tmpDir, "doris");
+    const topicDir = join(tmpDir, "doris", "roles", "default");
     mkdirSync(topicDir, { recursive: true });
     writeFileSync(
       join(topicDir, "_catalog.md"),

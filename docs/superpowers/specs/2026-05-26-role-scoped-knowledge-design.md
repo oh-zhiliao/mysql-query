@@ -124,6 +124,13 @@ Per-request resolution then filters this in-memory structure by `context.role` a
 
 This keeps runtime behavior request-aware without rescanning the filesystem on every tool call.
 
+Knowledge reload semantics:
+
+- startup and `/mysql-query reload-knowledge` both rebuild the same in-memory snapshot
+- knowledge edits on disk are not visible until reload or process restart
+- reload first validates the full tree, then atomically swaps the snapshot
+- on reload failure, the previous snapshot remains active
+
 For a given alias:
 
 1. resolve role-specific catalog and docs from `roles/<role>/`
@@ -139,6 +146,13 @@ Resolution output for each alias should include:
 - visible docs map
 - short alias description for `query` tool description, derived only from visible role/common scopes or a generic fallback
 
+Validation rules for a knowledge snapshot:
+
+- `roles/<role>/` is invalid if it contains any `*.md` knowledge docs but no `roles/<role>/_catalog.md`
+- `common/` is invalid if it contains any `*.md` knowledge docs but no `common/_catalog.md`
+- invalid scopes fail snapshot construction during explicit reload
+- startup may log and skip missing knowledge roots, but once a scope is discovered it must satisfy the scope-level validation above
+
 Knowledge changes on disk do not become visible automatically. This design adds an explicit command-based reload instead of a filesystem watcher.
 
 ### 4. query Tool Description Filtering
@@ -151,6 +165,13 @@ Alias visibility is based on account availability:
 - for `role=default` or missing context, visible if `accounts.default` exists
 - non-default roles do not fall back to `accounts.default`
 - if an alias is visible by account but has no visible knowledge, it may still appear with a generic description
+
+Account configuration rules:
+
+- an alias must define at least one account
+- `accounts.default` is recommended but no longer required globally
+- aliases that only serve a non-default role are valid
+- default-role or legacy query callers cannot use aliases that omit `accounts.default`
 
 The description for each visible alias should come from:
 
@@ -232,6 +253,12 @@ Tool metadata generation should also log when a role can query an alias but has 
 - access exists but knowledge has not been migrated
 - access does not exist, so the alias is intentionally hidden
 
+This produces the same `knowledge missing` signal during:
+
+- `query` tool description generation
+- role-scoped system prompt generation
+- `get_topic_knowledge` resolution
+
 Reload operations should log:
 
 ```text
@@ -312,6 +339,13 @@ Migration rules:
 
 No automatic migration is attempted. Operators must restructure knowledge manually because only they know which docs belong to which roles.
 
+Deploy-before-migration behavior:
+
+- visible aliases still appear in the `query` tool description using the generic fallback description
+- role-scoped system prompt addendum may be empty for those aliases
+- `get_topic_knowledge` denies access for unmigrated role scopes
+- `knowledge missing` logs must make this state explicit so operators can distinguish migration lag from authorization problems
+
 ### 9. Tests
 
 Required coverage:
@@ -323,10 +357,15 @@ Required coverage:
 - `allow_common_knowledge=false` excludes common docs
 - `allow_common_knowledge=true` includes common docs
 - `get_topic_knowledge` denies docs outside the visible scope
+- `executeTool("get_topic_knowledge", ..., context)` must forward `context` into role-scoped knowledge resolution
+- role-visible alias computation is centralized in a single helper used by tool metadata and prompts
 - missing role knowledge emits `knowledge missing` logs with `hasRoleCatalog` and `reason`
+- knowledge resolution success emits `knowledge resolved` logs
 - denied knowledge access emits `knowledge denied` logs
 - tool descriptions and outputs do not leak usernames or passwords
 - aliases with no role account stay hidden even if common knowledge exists
+- aliases with only non-default accounts remain valid and are visible only to matching roles
+- deploy-before-migration keeps visible aliases queryable with generic descriptions while logging missing knowledge
 - `/mysql-query reload-knowledge` swaps in a fully validated snapshot on success
 - `/mysql-query reload-knowledge` preserves the previous snapshot on failure
 

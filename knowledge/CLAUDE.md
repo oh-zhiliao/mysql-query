@@ -7,21 +7,30 @@ This directory contains database-specific knowledge for the MySQL query plugin. 
 ```
 knowledge/
   CLAUDE.md                     # this file
-  {db_name}/                    # directory name must match key in config.yaml known_databases
-    _catalog.md                 # required: tables, conventions, doc index (always loaded into system prompt)
-    {doc-name}.md               # optional: task-based knowledge docs (loaded on-demand)
+  {alias}/                      # directory name must match key in config.yaml known_databases
+    common/                     # optional shared knowledge
+      _catalog.md               # required if common docs exist
+      {doc-name}.md
+    roles/
+      default/                  # default-role knowledge
+        _catalog.md             # required if role docs exist
+        {doc-name}.md
+      complaint/                # role-specific knowledge
+        _catalog.md
+        {doc-name}.md
 ```
 
 ## Adding a New Database
 
-1. Create a directory matching the database name in `config.yaml`
-2. Create `_catalog.md` with the required format (see below)
-3. Optionally add task-based doc files
+1. Create a directory matching the alias in `config.yaml`
+2. Create `roles/<role>/_catalog.md` for each role-specific scope you want to expose
+3. Optionally add `common/_catalog.md` plus shared docs if `allow_common_knowledge=true`
+4. Add task-based doc files under the same scope
 
 Knowledge directories remain keyed by configured alias, not by runtime physical database.
-If one alias can query multiple physical databases, document the default physical database and common alternatives in `_catalog.md`.
+If one alias can query multiple physical databases, document the default physical database and common alternatives in the relevant role catalog.
 
-## _catalog.md Format
+## Scope Catalog Format
 
 ```markdown
 ---
@@ -46,7 +55,11 @@ description: One-line description of what this database contains
 - **another-doc**: Description
 ```
 
-**Important**: The catalog body (Tables, Conventions, Available Docs sections) is loaded into the agent's system prompt on every turn. Keep it concise — list table names with brief descriptions, not full schema dumps. Put detailed examples in task-based docs instead.
+**Important**:
+
+- The current role only sees catalogs from its own `roles/<role>/` scope
+- `common/_catalog.md` is only visible when `allow_common_knowledge=true`
+- Keep catalog bodies concise; put detailed examples in task-based docs instead
 
 ## Task-Based Doc Format
 
@@ -77,18 +90,19 @@ SELECT query example
 
 ## Updating Knowledge
 
-- Edit files in place. The plugin reads them at startup.
-- Keep `_catalog.md` frontmatter `description` in sync with content.
-- Keep the "Available Docs" section in `_catalog.md` in sync with actual doc files.
-- If you add a new `.md` file, add a corresponding entry in the Available Docs section.
+- Edit files in place.
+- Keep each scope `_catalog.md` frontmatter `description` in sync with content.
+- Keep the "Available Docs" section in each scope catalog in sync with actual doc files in that scope.
+- If you add a new `.md` file, add a corresponding entry in the same scope catalog.
+- Changes take effect only after `/mysql-query reload-knowledge` or agent restart.
 
 ## What Goes Where
 
 | Content | Location | Why |
 |---|---|---|
-| Table names + brief descriptions | `_catalog.md` Tables section | Always needed for any query |
-| Naming conventions, data formats | `_catalog.md` Conventions section | Always relevant context |
-| Doc index with summaries | `_catalog.md` Available Docs section | LLM decides what to load |
+| Table names + brief descriptions | `roles/<role>/_catalog.md` or `common/_catalog.md` | Scope-specific context |
+| Naming conventions, data formats | Scope catalog Conventions section | Scope-specific context |
+| Doc index with summaries | Scope catalog Available Docs section | LLM decides what to load |
 | SQL syntax tips | Plugin code (shared across all databases) | Not database-specific |
 | Complex query patterns | Task-based doc files | Loaded on-demand to save tokens |
 | Investigation playbooks | Task-based doc files | Loaded on-demand when needed |

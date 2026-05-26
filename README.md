@@ -9,7 +9,7 @@ MySQL 数据库查询插件，为[知了](https://github.com/git-zhiliao/zhiliao
 - **只读 SQL 查询**：执行 SELECT / SHOW / DESCRIBE / EXPLAIN 语句，自动拒绝写操作
 - **自动 LIMIT**：未指定 LIMIT 的 SELECT 语句自动添加（默认 100，最大 1000），防止全表扫描
 - **多数据库支持**：通过友好名称引用已配置的数据库，无需记忆连接信息
-- **知识库系统**：三层知识加载机制，按需加载查询模式，节省 token 开销
+- **知识库系统**：role-scoped 知识隔离，按需加载查询模式，减少无意义试探
 - **基于角色的数据库账号**：同一个数据库别名可按 `role` 选择不同的查询账号
 - **运行时数据库选择**：配置 key 表示连接别名，物理库可在查询时通过 `instance + optional database` 指定
 - **连接池管理**：每个数据库别名、role、物理库组合独立连接池，自动管理连接生命周期
@@ -31,18 +31,34 @@ mysql-query/
   package.json             # 依赖（mysql2）
   knowledge/               # 知识库目录（gitignored，独立管理）
     CLAUDE.md              # 知识库编写指南
-    {db_name}/
-      _catalog.md          # 表、约定、文档索引（始终加载）
-      {doc-name}.md        # 任务导向的查询模式文档（按需加载）
+    {alias}/
+      common/              # 可选公共知识（仅 allow_common_knowledge=true 时可见）
+        _catalog.md
+        {doc-name}.md
+      roles/
+        default/           # default role 专属知识
+          _catalog.md
+          {doc-name}.md
+        complaint/         # complaint role 专属知识
+          _catalog.md
+          {doc-name}.md
 ```
 
-## 知识库三层架构
+## Role-Scoped 知识库
 
 | 层级 | 来源 | 加载方式 | 内容 |
 |---|---|---|---|
 | 插件级 | 代码中硬编码 | 始终加载 | SQL 通用语法、安全限制、使用技巧 |
-| 数据库目录 | `knowledge/{db}/_catalog.md` | 始终加载 | 表结构、项目约定、文档索引 |
-| 任务文档 | `knowledge/{db}/{doc}.md` | 按需加载 | 详细查询模式、分析方法、排查手册 |
+| role 目录 | `knowledge/{alias}/roles/{role}/_catalog.md` | 仅当前 role 可见 | 表结构、项目约定、文档索引 |
+| 公共目录 | `knowledge/{alias}/common/*.md` | 仅 `allow_common_knowledge=true` 时可见 | 可跨 role 共享的非敏感知识 |
+| 任务文档 | `roles/{role}/{doc}.md` / `common/{doc}.md` | 按需加载 | 详细查询模式、分析方法、排查手册 |
+
+规则：
+
+- 默认严格隔离：只读取 `roles/<role>/...`
+- 若 `allow_common_knowledge: true`，则在 role 知识之外再附加 `common/...`
+- `query` 工具只会向当前 role 暴露有权限的 alias
+- 若 alias 可查询但知识尚未迁移，工具描述会退化成 `configured database alias`，同时打 `knowledge missing` 日志
 
 ## 安全机制
 
@@ -83,6 +99,8 @@ cp mysql-query/config.example.yaml mysql-query/config.yaml
 编辑 `config.yaml`：
 
 ```yaml
+allow_common_knowledge: false
+
 known_databases:
   my_app:
     host: "127.0.0.1"
@@ -103,10 +121,12 @@ known_databases:
 
 - `known_databases.<key>` 里的 `<key>` 是连接别名，不是固定物理库名
 - 配置里的 `database` 只是默认物理库；查询时也可以显式指定别的物理库
-- `accounts.default` 是没有 role 时使用的默认查询账号
+- `accounts.default` 是 default/legacy 调用使用的默认查询账号
 - 当知了请求上下文里带了 `role` 时，插件会优先查 `accounts.<role>`
 - 若请求 role 不是 `default` 且未配置对应账号，查询会直接拒绝，不回退到 `default`
+- 某个 alias 可以只给特定 role 配账号；这种 alias 对 default 调用方不可见
 - 旧的顶层 `user/password` 已移除，需要迁移到 `accounts.default`
+- `allow_common_knowledge` 默认是 `false`，表示知识库默认严格按 role 隔离
 
 推荐调用方式：
 
@@ -136,8 +156,8 @@ docker compose logs agent | grep "Plugin loaded"
 # 预期输出: Plugin loaded: mysql-query (1 tools)
 # 或（如有知识库）: Plugin loaded: mysql-query (2 tools)
 
-# 如有知识库，还会看到:
-# Knowledge loaded for "my_app": catalog + N docs
+# 如有知识库，还会看到 role-scoped 日志，例如:
+# [mysql-query] knowledge resolved: role=default alias=my_app scope=role docs=N
 ```
 
 ### Docker 部署
@@ -159,5 +179,10 @@ services:
 ## Agent 指南：知识库维护
 
 知识库目录 `knowledge/` 被 gitignore，独立于插件代码管理。可由外部 Agent 生成、独立仓库管理或手动维护。
+
+知识库更新后需显式生效：
+
+- 管理员执行 `/mysql-query reload-knowledge`
+- 或重启 agent
 
 完整编写指南（目录结构、文件格式、命名原则、内容分层规则）见 [`knowledge/CLAUDE.md`](knowledge/CLAUDE.md)。
