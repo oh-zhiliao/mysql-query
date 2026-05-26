@@ -55,6 +55,11 @@ interface VisibleKnowledge {
   hasCommonCatalog: boolean;
 }
 
+interface VisibleAliasEntry {
+  alias: string;
+  visible: VisibleKnowledge;
+}
+
 interface ResolvedQueryTarget {
   alias: string;
   physicalDatabase: string;
@@ -229,12 +234,10 @@ export default class MySQLQueryPlugin implements ToolPlugin {
   }
 
   getToolDefinitions(context?: RequestContext): ToolDefinition[] {
-    const visibleAliases = this.getVisibleAliases(context);
+    const visibleAliases = this.getVisibleAliasEntries(context);
     const dbList = visibleAliases
-      .map((alias) => {
-        const visible = this.resolveVisibleKnowledge(alias, context);
+      .map(({ alias, visible }) => {
         const description = visible.roleScope?.description || visible.commonScope?.description || "configured database alias";
-        this.logKnowledgeVisibility(alias, visible);
         return `  - "${alias}" — ${description}`;
       })
       .join("\n");
@@ -281,8 +284,7 @@ export default class MySQLQueryPlugin implements ToolPlugin {
     ];
 
     const availableDocs = visibleAliases
-      .flatMap((alias) => {
-        const visible = this.resolveVisibleKnowledge(alias, context);
+      .flatMap(({ alias, visible }) => {
         const docs = new Map<string, TopicDocMeta>();
         for (const [docName, docMeta] of visible.commonScope?.docs ?? []) {
           docs.set(docName, docMeta);
@@ -304,7 +306,7 @@ export default class MySQLQueryPlugin implements ToolPlugin {
           "For this tool, `database` still means the configured alias used by the knowledge directory.",
           "",
           "Available docs:",
-          availableDocs || "  (none)",
+          availableDocs,
         ].join("\n"),
         input_schema: {
           type: "object",
@@ -387,11 +389,8 @@ export default class MySQLQueryPlugin implements ToolPlugin {
       "- If a user asks about connection info, say it is managed by the system",
     );
 
-    const visibleAliases = this.getVisibleAliases(context);
-    const visibleCatalogs = visibleAliases
-      .map((alias) => ({ alias, visible: this.resolveVisibleKnowledge(alias, context) }))
-      .filter(({ alias, visible }) => {
-        this.logKnowledgeVisibility(alias, visible);
+    const visibleCatalogs = this.getVisibleAliasEntries(context)
+      .filter(({ visible }) => {
         return Boolean(visible.roleScope?.catalogBody || visible.commonScope?.catalogBody);
       });
 
@@ -473,7 +472,7 @@ export default class MySQLQueryPlugin implements ToolPlugin {
       throw new Error(`Unknown database "${dbName}"`);
     }
 
-    const role = context?.role;
+    const role = this.normalizeRole(context?.role);
     if (!role) {
       if (!db.accounts.default) {
         throw new Error(`Access denied: default role is not configured for database ${dbName}.`);
@@ -571,14 +570,22 @@ export default class MySQLQueryPlugin implements ToolPlugin {
   }
 
   private getVisibleAliases(context?: RequestContext): string[] {
-    const role = context?.role ?? "default";
+    const role = this.normalizeRole(context?.role) ?? "default";
     return Object.entries(this.config.known_databases)
       .filter(([, db]) => role === "default" ? Boolean(db.accounts.default) : Object.hasOwn(db.accounts, role))
       .map(([alias]) => alias);
   }
 
+  private getVisibleAliasEntries(context?: RequestContext): VisibleAliasEntry[] {
+    return this.getVisibleAliases(context).map((alias) => {
+      const visible = this.resolveVisibleKnowledge(alias, context);
+      this.logKnowledgeVisibility(alias, visible);
+      return { alias, visible };
+    });
+  }
+
   private resolveVisibleKnowledge(alias: string, context?: RequestContext): VisibleKnowledge {
-    const role = context?.role ?? "default";
+    const role = this.normalizeRole(context?.role) ?? "default";
     const aliasKnowledge = this.knowledgeByAlias.get(alias);
     const roleScope = aliasKnowledge?.roleScopes.get(role);
     const commonScope = this.config.allow_common_knowledge ? aliasKnowledge?.commonScope : undefined;
@@ -589,6 +596,12 @@ export default class MySQLQueryPlugin implements ToolPlugin {
       hasRoleCatalog: Boolean(aliasKnowledge?.roleScopes.has(role)),
       hasCommonCatalog: Boolean(aliasKnowledge?.commonScope),
     };
+  }
+
+  private normalizeRole(role?: string): string | undefined {
+    if (role === undefined || role === null) return undefined;
+    const trimmed = role.trim();
+    return trimmed === "" ? undefined : trimmed;
   }
 
   private logKnowledgeVisibility(alias: string, visible: VisibleKnowledge): void {
@@ -639,7 +652,7 @@ export default class MySQLQueryPlugin implements ToolPlugin {
       }
 
       const accountKey = this.resolveAccountKey(target.alias, context);
-      const requestedRole = context?.role || "default";
+      const requestedRole = this.normalizeRole(context?.role) ?? "default";
       console.log(
         `[mysql-query] query logId=${context?.logId || "-"} requestedRole=${requestedRole} account=${accountKey} instance=${target.alias} database=${target.physicalDatabase} mode=${target.legacyMode ? "legacy" : "instance"}`,
       );

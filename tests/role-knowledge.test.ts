@@ -181,6 +181,79 @@ describe("mysql-query role-scoped knowledge", () => {
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("common_disabled"));
   });
 
+  it("includes common knowledge when allow_common_knowledge is true", async () => {
+    const { plugin, tmpDir } = await initPluginWithKnowledge({
+      allow_common_knowledge: true,
+      known_databases: {
+        doris: {
+          host: "127.0.0.1",
+          database: "wizard",
+          accounts: {
+            complaint: { user: "complaint", password: "secret2" },
+          },
+        },
+      },
+      knowledgeTree: {
+        doris: {
+          common: {
+            catalog: "---\ndescription: common doris\n---\n## Shared\n- `tickets`",
+            docs: { "shared.md": "---\ntitle: Shared\n---\nShared doc body" },
+          },
+          roles: {
+            complaint: {
+              catalog: "---\ndescription: complaint doris\n---\n## Private\n- `complaints`",
+              docs: { "complaint.md": "---\ntitle: Complaint\n---\nComplaint doc body" },
+            },
+          },
+        },
+      },
+    });
+    cleanupDirs.push(tmpDir);
+
+    const requestContext = { channel: "feishu", userId: "ou1", role: "complaint", logId: "log1" } as const;
+    const defs = plugin.getToolDefinitions(requestContext);
+    const addendum = plugin.getSystemPromptAddendum?.(requestContext) ?? "";
+    const out = await plugin.executeTool("get_topic_knowledge", { database: "doris", doc: "shared" }, requestContext);
+
+    const knowledgeDef = defs.find((def) => def.name === "get_topic_knowledge");
+    expect(knowledgeDef?.description).toContain('doc="shared"');
+    expect(addendum).toContain("## Shared");
+    expect(out).toContain("Shared doc body");
+  });
+
+  it("uses roles/default knowledge when request context is omitted", async () => {
+    const { plugin, tmpDir } = await initPluginWithKnowledge({
+      known_databases: {
+        doris: {
+          host: "127.0.0.1",
+          database: "wizard",
+          accounts: {
+            default: { user: "readonly", password: "secret1" },
+          },
+        },
+      },
+      knowledgeTree: {
+        doris: {
+          roles: {
+            default: {
+              catalog: "---\ndescription: default doris\n---\n## Tables\n- `tickets`",
+              docs: { "default.md": "---\ntitle: Default\n---\nDefault doc body" },
+            },
+          },
+        },
+      },
+    });
+    cleanupDirs.push(tmpDir);
+
+    const defs = plugin.getToolDefinitions();
+    const addendum = plugin.getSystemPromptAddendum?.() ?? "";
+    const out = await plugin.executeTool("get_topic_knowledge", { database: "doris", doc: "default" });
+
+    expect(JSON.stringify(defs)).toContain("default doris");
+    expect(addendum).toContain("## Tables");
+    expect(out).toContain("Default doc body");
+  });
+
   it("allows aliases that only have a non-default account and only exposes them to that role", async () => {
     const { plugin, tmpDir } = await initPluginWithKnowledge({
       known_databases: {
