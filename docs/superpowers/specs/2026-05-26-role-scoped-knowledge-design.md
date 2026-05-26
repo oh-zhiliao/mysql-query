@@ -21,6 +21,7 @@ The current production behavior shows this clearly: `role=complaint` correctly u
 - Limit `query` tool alias descriptions to aliases the current role is allowed to query
 - Add observability when knowledge resolution succeeds or fails
 - Update knowledge authoring documentation so operators know how to restructure docs
+- Explicitly scope the required zhiliao core changes, because current tool metadata APIs are startup-time and request-agnostic
 
 ## Non-Goals
 
@@ -40,7 +41,7 @@ New layout:
 knowledge/
   CLAUDE.md
   <alias>/
-    _catalog.md                    # optional alias-level summary only, not schema-rich
+    _catalog.md                    # optional deprecated alias-level summary, not used for role-scoped prompts
     common/
       _catalog.md                  # optional common catalog
       <doc>.md
@@ -52,15 +53,36 @@ knowledge/
 
 Rules:
 
-- `knowledge/<alias>/roles/<role>/_catalog.md` is the primary catalog for that role
+- `knowledge/<alias>/roles/<role>/_catalog.md` is the primary catalog for that role when role-specific knowledge exists
 - `knowledge/<alias>/common/_catalog.md` is only considered when `allow_common_knowledge=true`
-- top-level `knowledge/<alias>/_catalog.md` remains optional, but only for a one-line alias description and migration compatibility
+- top-level `knowledge/<alias>/_catalog.md` remains optional only for migration bookkeeping; it is not loaded into role-scoped prompts or tool descriptions
 - top-level role-agnostic task docs under `knowledge/<alias>/*.md` are deprecated and will no longer be loaded into role-scoped prompts
 
 Reasoning:
 
-- If alias-level `_catalog.md` still contains table lists and doc indices, strict isolation is not real
+- If alias-level `_catalog.md` still contributes prompt content, strict isolation is not real
 - Putting `_catalog.md` inside `roles/<role>/` keeps schema knowledge and doc indices aligned with the role that can use them
+
+### 1.5 Core Interface Dependency
+
+This feature cannot be implemented purely inside `mysql-query`.
+
+Current zhiliao core APIs expose tool metadata only at startup:
+
+- `ToolPlugin.getToolDefinitions()` has no request context
+- `ToolPlugin.getSystemPromptAddendum()` has no request context
+- `ToolRegistry` aggregates both once per process without role-awareness
+
+Because the user explicitly wants role-specific alias visibility in the `query` tool description, this design requires a zhiliao core interface change.
+
+Required contract change:
+
+- `getToolDefinitions(context?: RequestContext): ToolDefinition[]`
+- `getSystemPromptAddendum(context?: RequestContext): string`
+- `ToolRegistry.getToolDefinitions(context?: RequestContext): ToolDefinition[]`
+- `ToolRegistry.getSystemPromptAddendum(context?: RequestContext): string`
+
+Implementation may internally cache static data, but metadata generation must become request-aware.
 
 ### 2. Config
 
@@ -76,18 +98,35 @@ Semantics:
 - when `false`, only `roles/<role>/...` is visible
 - when `true`, the role can read both `roles/<role>/...` and `common/...`
 
-This flag is plugin-wide, not per alias. The simpler model is easier to reason about and matches the user's requirement: strict by default, with one explicit switch for common knowledge.
+This flag is plugin-wide, not per alias. That is intentional to match the user's requested policy shape: strict by default, with one explicit switch for common knowledge.
+
+To avoid over-broad exposure despite the plugin-wide flag:
+
+- alias visibility is still gated first by role-specific account availability
+- common knowledge is only considered for aliases that are already visible to the current role
+- common knowledge never makes an otherwise invisible alias appear
 
 ### 3. Role-Scoped Knowledge Resolution
 
 At runtime, `mysql-query` resolves knowledge using `context.role ?? "default"`.
+
+Knowledge files are loaded once at startup into a nested in-memory structure:
+
+- alias
+- scope (`role:<role>` or `common`)
+- catalog metadata
+- visible docs
+
+Per-request resolution then filters this in-memory structure by `context.role` and `allow_common_knowledge`.
+
+This keeps runtime behavior request-aware without rescanning the filesystem on every tool call.
 
 For a given alias:
 
 1. resolve role-specific catalog and docs from `roles/<role>/`
 2. if `allow_common_knowledge=true`, additionally resolve common catalog and docs from `common/`
 3. ignore deprecated top-level task docs
-4. use alias-level `_catalog.md` only as a fallback alias description, not as schema-rich prompt content
+4. do not use alias-level `_catalog.md` in role-scoped prompt content or alias descriptions
 
 Resolution output for each alias should include:
 
@@ -95,7 +134,7 @@ Resolution output for each alias should include:
 - whether role-specific catalog exists
 - whether common catalog exists
 - visible docs map
-- short alias description for `query` tool description
+- short alias description for `query` tool description, derived only from visible role/common scopes or a generic fallback
 
 ### 4. query Tool Description Filtering
 
@@ -106,19 +145,21 @@ Alias visibility is based on account availability:
 - visible if `accounts.<role>` exists
 - for `role=default` or missing context, visible if `accounts.default` exists
 - non-default roles do not fall back to `accounts.default`
+- if an alias is visible by account but has no visible knowledge, it may still appear with a generic description
 
 The description for each visible alias should come from:
 
 1. role-specific catalog description
 2. common catalog description, if allowed
-3. alias-level `_catalog.md` description, as a last-resort summary only
-4. otherwise, a generic fallback such as `"configured database alias"`
+3. otherwise, a generic fallback such as `"configured database alias"`
 
 The tool description must not expose:
 
 - usernames
 - passwords
 - account keys beyond role names already implied by the request context
+
+If a role has no configured account for an alias, that alias should not be listed. This is intentional. If the model somehow still calls the tool for that alias, existing runtime account resolution remains the final enforcement point and must continue returning access denied.
 
 ### 5. get_topic_knowledge Behavior
 
@@ -133,6 +174,18 @@ When called with `{ database: <alias>, doc: <doc> }`:
 When the requested doc is not visible, return a clear non-sensitive error such as:
 
 `No knowledge document is available for alias "<alias>" under role "<role>".`
+
+### 5.5 System Prompt Leakage Closure
+
+`getSystemPromptAddendum()` must become role-aware under the same request context contract described in section 1.5.
+
+Current behavior injects catalog bodies for all aliases into the system prompt. This design explicitly replaces that with:
+
+- only role-visible alias summaries
+- only role-visible catalog content
+- optional common content when enabled
+
+Without this change, knowledge isolation is incomplete even if `get_topic_knowledge` is fixed.
 
 ### 6. Logging and Observability
 
@@ -169,6 +222,11 @@ These logs are required because operators need to distinguish:
 - `common_disabled`: common knowledge exists, but `allow_common_knowledge=false`
 - `empty_scope`: at least one visible catalog exists, but no docs were resolved for the requested operation
 
+Tool metadata generation should also log when a role can query an alias but has no visible knowledge, so operators can distinguish:
+
+- access exists but knowledge has not been migrated
+- access does not exist, so the alias is intentionally hidden
+
 ### 7. Documentation Updates
 
 Implementation must update the knowledge-related docs, not just code.
@@ -195,8 +253,9 @@ This is a behavior change for knowledge loading.
 Migration rules:
 
 - existing account-routing behavior remains unchanged
+- existing runtime data access control already remains enforced by role-based account routing inside `executeTool`
 - existing top-level `knowledge/<alias>/*.md` task docs stop participating in role-scoped loading
-- existing top-level `knowledge/<alias>/_catalog.md` may remain as a short alias summary, but operators should migrate schema/table/doc-index content into:
+- existing top-level `knowledge/<alias>/_catalog.md` may remain on disk for migration reference, but operators should migrate schema/table/doc-index content into:
   - `knowledge/<alias>/roles/<role>/_catalog.md`
   - optionally `knowledge/<alias>/common/_catalog.md`
 
@@ -206,7 +265,9 @@ No automatic migration is attempted. Operators must restructure knowledge manual
 
 Required coverage:
 
+- request-aware tool metadata path in zhiliao core passes `RequestContext` through to `getToolDefinitions` and `getSystemPromptAddendum`
 - role-specific `query` tool description only lists aliases visible to that role
+- role-specific system prompt addendum only includes visible alias/catalog content
 - role-specific knowledge resolution loads only `roles/<role>/...`
 - `allow_common_knowledge=false` excludes common docs
 - `allow_common_knowledge=true` includes common docs
@@ -214,6 +275,9 @@ Required coverage:
 - missing role knowledge emits `knowledge missing` logs with `hasRoleCatalog` and `reason`
 - denied knowledge access emits `knowledge denied` logs
 - tool descriptions and outputs do not leak usernames or passwords
+- aliases with no role account stay hidden even if common knowledge exists
+
+Some of these are regression tests over existing secret filtering and runtime account routing, but they should be kept because this feature changes the prompt and metadata surfaces around those controls.
 
 ## Rollout Notes
 
