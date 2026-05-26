@@ -20,6 +20,7 @@ The current production behavior shows this clearly: `role=complaint` correctly u
 - Optionally allow a role to read shared common knowledge via an explicit config switch
 - Limit `query` tool alias descriptions to aliases the current role is allowed to query
 - Add observability when knowledge resolution succeeds or fails
+- Allow operators to explicitly reload knowledge without restarting the whole agent
 - Update knowledge authoring documentation so operators know how to restructure docs
 - Explicitly scope the required zhiliao core changes, because current tool metadata APIs are startup-time and request-agnostic
 
@@ -28,6 +29,7 @@ The current production behavior shows this clearly: `role=complaint` correctly u
 - No change to database-side authorization: actual data access is still enforced by the database account
 - No change to request role resolution in zhiliao core
 - No attempt to infer permissions from table names or SQL text inside the plugin
+- No automatic filesystem watch or hot-reload on file change
 
 ## Design
 
@@ -136,6 +138,8 @@ Resolution output for each alias should include:
 - visible docs map
 - short alias description for `query` tool description, derived only from visible role/common scopes or a generic fallback
 
+Knowledge changes on disk do not become visible automatically. This design adds an explicit command-based reload instead of a filesystem watcher.
+
 ### 4. query Tool Description Filtering
 
 `query` tool description should only list aliases the current role can query.
@@ -227,6 +231,49 @@ Tool metadata generation should also log when a role can query an alias but has 
 - access exists but knowledge has not been migrated
 - access does not exist, so the alias is intentionally hidden
 
+Reload operations should log:
+
+```text
+[mysql-query] knowledge reload started: by=<userId>
+[mysql-query] knowledge reload finished: aliases=<n> roleScopes=<n> commonScopes=<n>
+```
+
+If reload fails:
+
+```text
+[mysql-query] knowledge reload failed: by=<userId> error=<message>
+```
+
+### 6.5 Explicit Reload Command
+
+Add a plugin command:
+
+```text
+/mysql-query reload-knowledge
+```
+
+Behavior:
+
+- reloads knowledge from disk into the in-memory alias/scope structure
+- does not rebuild database pools
+- does not require agent restart
+- returns a concise success or failure message to the caller
+
+Authorization:
+
+- admin-only
+- use the same admin gate already applied to other sensitive operational commands in zhiliao
+
+Error handling:
+
+- if the new knowledge tree is invalid, keep serving the previous in-memory snapshot
+- only swap in the new snapshot after a full successful reload
+
+Reasoning:
+
+- explicit reload solves the operational need without introducing file-watch complexity
+- copy-on-success reload avoids partially broken knowledge state after a bad edit
+
 ### 7. Documentation Updates
 
 Implementation must update the knowledge-related docs, not just code.
@@ -237,12 +284,14 @@ Required doc updates:
   - explain role-scoped knowledge layout
   - document `allow_common_knowledge`
   - explain that `query` alias visibility is role-sensitive
+  - document `/mysql-query reload-knowledge`
 - `README_EN.md`
   - same content in English if the repo keeps both language variants in sync
 - `knowledge/CLAUDE.md`
   - rewrite structure examples to use `roles/<role>/` and optional `common/`
   - explain that role-specific `_catalog.md` is now the primary schema/index document
   - mark top-level task docs as deprecated
+  - explain that edits require `/mysql-query reload-knowledge` or agent restart
 - `config.example.yaml`
   - include `allow_common_knowledge: false`
 
@@ -258,6 +307,7 @@ Migration rules:
 - existing top-level `knowledge/<alias>/_catalog.md` may remain on disk for migration reference, but operators should migrate schema/table/doc-index content into:
   - `knowledge/<alias>/roles/<role>/_catalog.md`
   - optionally `knowledge/<alias>/common/_catalog.md`
+- after migrating files, operators should run `/mysql-query reload-knowledge` or restart the agent
 
 No automatic migration is attempted. Operators must restructure knowledge manually because only they know which docs belong to which roles.
 
@@ -276,6 +326,8 @@ Required coverage:
 - denied knowledge access emits `knowledge denied` logs
 - tool descriptions and outputs do not leak usernames or passwords
 - aliases with no role account stay hidden even if common knowledge exists
+- `/mysql-query reload-knowledge` swaps in a fully validated snapshot on success
+- `/mysql-query reload-knowledge` preserves the previous snapshot on failure
 
 Some of these are regression tests over existing secret filtering and runtime account routing, but they should be kept because this feature changes the prompt and metadata surfaces around those controls.
 
