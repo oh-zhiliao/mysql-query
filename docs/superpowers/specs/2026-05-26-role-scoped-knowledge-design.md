@@ -83,6 +83,7 @@ Required contract change:
 - `getSystemPromptAddendum(context?: RequestContext): string`
 - `ToolRegistry.getToolDefinitions(context?: RequestContext): ToolDefinition[]`
 - `ToolRegistry.getSystemPromptAddendum(context?: RequestContext): string`
+- `CommandCallContext` should expose `isAdmin: boolean` for admin-only plugin commands such as `/mysql-query reload-knowledge`
 
 Implementation may internally cache static data, but metadata generation must become request-aware.
 
